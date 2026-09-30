@@ -8,7 +8,7 @@ import { builtinPlans } from './plans.js';
 import { Editor2D } from './editor2d.js';
 import { View3D } from './view3d.js';
 import { exportDXF, dxfToPlan, decodeDXF, planFromGeometry } from './dxf.js';
-import { saveFile, readAsText, readAsBuffer, readAsDataURL, imageToUnderlay, openPdf, renderPdfPage, extractPdfVectors } from './files.js';
+import { saveFile, downloadsCap, readAsText, readAsBuffer, readAsDataURL, imageToUnderlay, openPdf, renderPdfPage, extractPdfVectors } from './files.js';
 
 const STORE_KEY = 'house3d.project.v1';
 const $ = (s) => document.querySelector(s);
@@ -45,6 +45,7 @@ class App {
     this.applyTheme();
     requestAnimationFrame(() => { this.editor.fit(); this.view.setView('iso', true); });
     this.snapshotBase();
+    downloadsCap(); // 在 Claude 檢視器裡預先取得存檔能力，第一次匯出不必等
   }
 
   // ---------- 專案 ----------

@@ -3,7 +3,7 @@
 // 在 Claude Artifact 檢視器裡改走 downloads 能力（它只接受部分副檔名，其餘包成 zip）
 const ARTIFACT_OK = /\.(png|jpg|jpeg|webp|gif|svg|json|txt|md|csv|html|pdf|zip)$/i;
 let dlCap;
-async function downloadsCap() {
+export async function downloadsCap() {
   if (dlCap !== undefined) return dlCap;
   dlCap = null;
   try { if (window.claude?.use) dlCap = await window.claude.use('downloads'); } catch { dlCap = null; }
