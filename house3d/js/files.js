@@ -104,10 +104,23 @@ async function loadPdfJs() {
   return pdfjs;
 }
 
+// 中文 PDF 需要的字元對照表（CMap）打包在一個 JSON 裡，第一次用到時才載入
+let cmapTable = null;
+class JsonCMapReaderFactory {
+  async fetch({ name }) {
+    if (!cmapTable) cmapTable = fetch(new URL('../vendor/pdfjs/cmaps.json', import.meta.url)).then((r) => r.json());
+    const b64 = (await cmapTable)[name];
+    if (!b64) throw new Error('找不到字元對照表 ' + name);
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return { cMapData: bytes, isCompressed: true };
+  }
+}
+
 export async function openPdf(buffer) {
   const lib = await loadPdfJs();
-  const cMapUrl = new URL('../vendor/pdfjs/cmaps/', import.meta.url).href;
-  return lib.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false, cMapUrl, cMapPacked: true }).promise;
+  return lib.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false, CMapReaderFactory: JsonCMapReaderFactory, useWorkerFetch: false }).promise;
 }
 
 export async function renderPdfPage(doc, pageNo, maxPx = 2400) {

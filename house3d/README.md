@@ -81,7 +81,7 @@ house3d/
 │  ├─ geometry.js      房間自動偵測
 │  ├─ dxf.js           DXF 匯出與辨識
 │  └─ files.js         存檔、ZIP、圖片/PDF 底圖、向量 PDF 擷取
-├─ vendor/             three.js r170、pdf.js 4.10（含中文 CMap）
+├─ vendor/             three.js r170、pdf.js 4.10（中文 CMap 打包在 cmaps.json；worker 內的控制字元已改寫成 \xNN 跳脫，功能相同）
 ├─ assets/             三張原圖（底圖對照用）
 └─ tests/dxf-roundtrip.mjs   `node house3d/tests/dxf-roundtrip.mjs`
 ```
