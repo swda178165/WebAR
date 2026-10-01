@@ -33,6 +33,10 @@ export const CATALOG = {
   stair: { name: '樓梯', w: 224, d: 340, h: 350, group: '結構', risers: 19, style: 'U' },
   elevator: { name: '電梯', w: 185, d: 170, h: 240, group: '結構' },
   plant: { name: '植栽', w: 45, d: 45, h: 120, group: '其他' },
+  tatami: { name: '和室架高地板', w: 270, d: 180, h: 40, group: '臥室' },
+  lowtable: { name: '和室桌', w: 90, d: 60, h: 35, group: '客餐廳' },
+  stool: { name: '吧檯椅', w: 40, d: 40, h: 68, group: '廚房' },
+  altar: { name: '神明桌', w: 160, d: 100, h: 105, group: '其他' },
   box: { name: '方塊', w: 60, d: 60, h: 60, group: '其他' },
 };
 

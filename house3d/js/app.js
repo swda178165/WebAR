@@ -5,10 +5,15 @@ import {
 } from './model.js';
 import { CATALOG, COUNTER_TOPS, itemName } from './catalog.js';
 import { builtinPlans, BUILTIN_VERSION } from './plans.js';
-import { STYLES } from './styles.js';
+import { STYLES, FURN_VARIANTS, variantOf } from './styles.js';
 import { Editor2D } from './editor2d.js';
 import { View3D } from './view3d.js';
 import { exportDXF, dxfToPlan, decodeDXF, planFromGeometry } from './dxf.js';
+import {
+  defaultSite, normalizeSite, analyzeDaylight, designWindows, CITIES, DIRS, SIDE_TYPES, SIDE_NAMES, SIDE_HINTS, dirName, bearingOf,
+  sideLabel, dfGrade, dfTarget, dfColor, DF_LEGEND, floorLabel, sunVector, planFrame,
+} from './site.js';
+import { generate, defaultProgram } from './generator.js';
 import { saveFile, downloadsCap, readAsText, readAsBuffer, readAsDataURL, imageToUnderlay, openPdf, renderPdfPage, extractPdfVectors } from './files.js';
 
 const STORE_KEY = 'house3d.project.v1';
@@ -29,6 +34,44 @@ const TOOL_HINTS = {
   underlay: '拖曳底圖對齊牆線，完成後按「完成移動」。',
 };
 
+// 方案縮圖（SVG）：房間色塊、牆、家具外框
+function planThumb(p) {
+  const xs = [], ys = [];
+  for (const w of p.walls) { xs.push(w.a.x, w.b.x); ys.push(w.a.y, w.b.y); }
+  const x0 = Math.min(...xs) - 30, x1 = Math.max(...xs) + 30, y0 = Math.min(...ys) - 30, y1 = Math.max(...ys) + 30;
+  const pt = (q) => q.map((v) => `${Math.round(v.x)},${Math.round(v.y)}`).join(' ');
+  let s = `<svg viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" class="thumb" role="img" aria-label="${esc(p.name)} 平面縮圖">`;
+  for (const r of p.rooms) s += `<polygon points="${pt(r.pts)}" fill="${ROOM_KINDS[r.kind]?.color || '#eee'}" opacity="0.9"/>`;
+  for (const it of p.items) {
+    if (['ac', 'acout', 'ledge', 'rug'].includes(it.kind)) continue;
+    const c = itemCornersOf(it);
+    s += `<polygon points="${pt(c)}" fill="none" stroke="#8b9097" stroke-width="2"/>`;
+  }
+  for (const w of p.walls) {
+    const L = Math.hypot(w.b.x - w.a.x, w.b.y - w.a.y) || 1;
+    const u = { x: (w.b.x - w.a.x) / L, y: (w.b.y - w.a.y) / L };
+    let cur = 0;
+    const ops = p.openings.filter((o) => o.wall === w.id).sort((a, b) => a.pos - b.pos);
+    const segs = [];
+    for (const o of ops) { const a = Math.max(cur, o.pos - o.w / 2); if (a > cur) segs.push([cur, a]); cur = Math.max(cur, o.pos + o.w / 2); }
+    if (cur < L) segs.push([cur, L]);
+    for (const [a, b] of segs) s += `<line x1="${Math.round(w.a.x + u.x * a)}" y1="${Math.round(w.a.y + u.y * a)}" x2="${Math.round(w.a.x + u.x * b)}" y2="${Math.round(w.a.y + u.y * b)}" stroke="${w.kind === 'parapet' ? '#8a8f96' : '#2a2e33'}" stroke-width="${w.t}"/>`;
+    for (const o of ops) if (o.type === 'window' || o.type === 'sliding') s += `<line x1="${Math.round(w.a.x + u.x * (o.pos - o.w / 2))}" y1="${Math.round(w.a.y + u.y * (o.pos - o.w / 2))}" x2="${Math.round(w.a.x + u.x * (o.pos + o.w / 2))}" y2="${Math.round(w.a.y + u.y * (o.pos + o.w / 2))}" stroke="#4a8ad6" stroke-width="5"/>`;
+  }
+  for (const r of p.rooms) {
+    if (['void', 'balcony', 'elevator', 'stair'].includes(r.kind) || !r.name) continue;
+    const c = polygonCentroid(r.pts);
+    s += `<text x="${Math.round(c.x)}" y="${Math.round(c.y + 14)}" font-size="44" text-anchor="middle" fill="#1f2328" font-weight="700" paint-order="stroke" stroke="#fff" stroke-width="8">${esc(r.name)}</text>`;
+  }
+  return s + '</svg>';
+}
+
+function itemCornersOf(it) {
+  const r = (it.rot || 0) * Math.PI / 180, c = Math.cos(r), sn = Math.sin(r);
+  const hw = it.w / 2, hd = it.d / 2;
+  return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map(([x, y]) => ({ x: it.x + x * c - y * sn, y: it.y + x * sn + y * c }));
+}
+
 class App {
   constructor() {
     this.settings = { snap: true, snapStep: 5, grid: true, dims: true, labels: true, area: true, itemLabels: true, highlighter: true };
@@ -36,6 +79,8 @@ class App {
     this.tool = 'select';
     this.placeKind = 'bed';
     this.history = new Map(); // planId → {undo:[], redo:[]}
+    this.daylight = { show: false, result: null, planId: null };
+    this.sideTab = 'props';
     this.load();
     this.editor = new Editor2D($('#plan2d'), this);
     this.view = new View3D($('#view3d'), this);
@@ -56,7 +101,7 @@ class App {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { saved = null; }
     if (saved?.plans?.length) {
-      this.project = { plans: saved.plans.map(normalizePlan), active: saved.active, builtinVersion: saved.builtinVersion || 1 };
+      this.project = { plans: saved.plans.map(normalizePlan), active: saved.active, builtinVersion: saved.builtinVersion || 1, site: normalizeSite(saved.site) };
       // 舊存檔沒有後來新增的提案：補上，不動使用者原本的平面
       if (this.project.builtinVersion < BUILTIN_VERSION) {
         const have = new Set(this.project.plans.map((p) => p.key).filter(Boolean));
@@ -74,9 +119,11 @@ class App {
       }
     } else {
       const plans = builtinPlans();
-      this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION };
+      this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION, site: defaultSite() };
     }
   }
+
+  get site() { return (this.project.site ||= defaultSite()); }
 
   save() {
     clearTimeout(this._saveT);
@@ -137,8 +184,67 @@ class App {
     const ss = document.getElementById('styleSel');
     if (ss && ss.value !== (this.plan.style || 'basic')) ss.value = this.plan.style || 'basic';
     if (!opts.skip3d) this.view.invalidate();
-    if (!transient) this.renderProps();
+    if (!transient) { this.renderProps(); this.scheduleDaylight(); }
     else this.updatePropsLive();
+  }
+
+  // ---------- 採光模擬 ----------
+  scheduleDaylight(now = false) {
+    const need = this.daylight.show || this.sideTab === 'site';
+    if (!need) { this.daylight.result = null; return; }
+    clearTimeout(this._dlT);
+    const run = () => {
+      try {
+        this.daylight.result = analyzeDaylight(this.plan, this.site);
+        this.daylight.planId = this.plan.id;
+      } catch (e) { console.error(e); this.daylight.result = null; }
+      if (this.daylight.show) this.editor.render();
+      if (this.sideTab === 'site') this.renderSitePanel();
+    };
+    if (now) run(); else this._dlT = setTimeout(run, 160);
+  }
+
+  setSideTab(t) {
+    this.sideTab = t;
+    document.querySelectorAll('#sideTabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
+    $('#props').hidden = t !== 'props';
+    $('#sitePanel').hidden = t !== 'site';
+    if (t === 'site') { this.renderSitePanel(); this.scheduleDaylight(true); }
+  }
+
+  setDaylight(on) {
+    this.daylight.show = on;
+    $('#toggleDaylight').classList.toggle('on', on);
+    if (on) this.scheduleDaylight(true); else this.editor.render();
+    if (this.sideTab === 'site') this.renderSitePanel();
+  }
+
+  setSun(on) {
+    this.view.setSunSim({ on });
+    $('#toggleSun').classList.toggle('on', on);
+    $('#sunBar').hidden = !on;
+    if (!on) this.stopSunPlay();
+    if (on) this.toast('日照模擬：依基地座向與四周建物計算陰影；拖曳時間看陽光怎麼照進屋內', 4500);
+    if (this.daylight.show) setTimeout(() => this.editor.render(), 60);
+    if (this.sideTab === 'site') this.renderSitePanel();
+  }
+
+  onSunUpdate(info) {
+    const el = $('#sunInfo');
+    if (el) {
+      const alt = info.alt * 180 / Math.PI;
+      el.textContent = alt <= 0 ? '太陽已在地平線以下' : `太陽高度 ${alt.toFixed(0)}°，從${dirName(info.az * 180 / Math.PI)}方照來（太陽時，約等於台灣時間）`;
+    }
+    if (this.daylight.show) { cancelAnimationFrame(this._sunRaf); this._sunRaf = requestAnimationFrame(() => this.editor.render()); }
+  }
+
+  stopSunPlay() { clearInterval(this._sunPlay); this._sunPlay = null; const b = $('#sunPlay'); if (b) b.textContent = '▶'; }
+
+  siteChanged() {
+    this.save();
+    this.view.setSunSim({ rebuild: true });
+    this.scheduleDaylight();
+    if (this.daylight.show) this.editor.render();
   }
 
   setSel(sel) {
@@ -256,6 +362,25 @@ class App {
     const styleSel = $('#styleSel');
     styleSel.innerHTML = Object.entries(STYLES).map(([k, v]) => `<option value="${k}">${esc(v.name)}</option>`).join('');
     styleSel.addEventListener('change', () => { this.plan.style = styleSel.value; this.commit(); this.toast(`風格：${STYLES[styleSel.value].name}`); });
+    document.querySelectorAll('#sideTabs button').forEach((b) => b.addEventListener('click', () => this.setSideTab(b.dataset.tab)));
+    $('#toggleDaylight').onclick = () => this.setDaylight(!this.daylight.show);
+    $('#toggleSun').onclick = () => this.setSun(!this.view.sunSim.on);
+    const sm = $('#sunMonth');
+    sm.innerHTML = Array.from({ length: 12 }, (_, i) => i + 1).map((m) => `<option value="${m}"${m === 12 ? ' selected' : ''}>${m} 月${{ 12: '（冬至）', 6: '（夏至）', 3: '（春分）', 9: '（秋分）' }[m] || ''}</option>`).join('');
+    sm.addEventListener('change', () => this.view.setSunSim({ month: +sm.value }));
+    const sh = $('#sunHour');
+    const fmtH = (v) => `${Math.floor(v)}:${String(Math.round((v % 1) * 60)).padStart(2, '0')}`;
+    sh.addEventListener('input', () => { $('#sunOut').textContent = fmtH(+sh.value); this.view.setSunSim({ hour: +sh.value }); });
+    $('#sunPlay').onclick = () => {
+      if (this._sunPlay) return this.stopSunPlay();
+      $('#sunPlay').textContent = '❚❚';
+      if (+sh.value >= 17.9) sh.value = 6;
+      this._sunPlay = setInterval(() => {
+        let v = +sh.value + 0.05;
+        if (v > 18) { v = 18; this.stopSunPlay(); }
+        sh.value = v; $('#sunOut').textContent = fmtH(v); this.view.setSunSim({ hour: v });
+      }, 70);
+    };
     $('#toggleLabels3d').onclick = (e) => { this.view.showLabels = !this.view.showLabels; e.currentTarget.classList.toggle('on', this.view.showLabels); this.view.invalidate(); };
     document.querySelectorAll('#walkpad button').forEach((b) => {
       const k = b.dataset.walk;
@@ -271,6 +396,7 @@ class App {
     $('#btnOpen').onclick = () => $('#fileInput').click();
     $('#fileInput').addEventListener('change', (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) this.importFile(f); });
     $('#btnHelp').onclick = () => this.showHelp();
+    $('#btnGen').onclick = () => this.openGenerator();
     // 手機切換
     document.querySelectorAll('#mobileSwitch button').forEach((b) => b.addEventListener('click', () => {
       document.querySelectorAll('#mobileSwitch button').forEach((x) => x.classList.toggle('on', x === b));
@@ -295,6 +421,8 @@ class App {
     matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => this.applyTheme());
     new MutationObserver(() => this.applyTheme()).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     this.setTool('select');
+    $('#sitePanel').addEventListener('change', (e) => this.onSiteField(e.target));
+    $('#sitePanel').addEventListener('click', (e) => this.onSiteClick(e));
   }
 
   applyTheme() {
@@ -395,6 +523,9 @@ class App {
         <li><b>拖拉修改：</b>在平面圖上直接拖牆（兩側相連的牆會跟著伸縮）、拖門窗沿牆滑動、拖家具（3D 裡也能拖）。選取後右側可輸入精確尺寸。</li>
         <li><b>畫新東西：</b>左側工具可畫牆、放門窗、放家具；「房間」點在牆圍起的區域內會自動算面積。</li>
         <li><b>丟檔案進來：</b>把 <b>DXF</b>（AutoCAD：另存新檔 → DXF）拖進視窗，自動辨識牆、門、房間產生 3D；由 CAD 直接輸出的向量 <b>PDF</b> 也能自動辨識；掃描圖或照片會變成底圖讓你描。</li>
+        <li><b>自動規劃：</b>按上方「自動規劃」，選幾房、幾衛、要不要書房／和室／神明廳等，程式會試過上百種配置、實際排家具並模擬採光，挑出幾種給你比較，喜歡的可以加入成新平面再拖拉修改。</li>
+        <li><b>基地・採光：</b>右側「基地・採光」設定座向、隔壁、馬路與對面樓高，程式會算出每個房間的採光與冬至日照，「依基地條件自動開窗」會把窗開在光線最好的位置；平面圖下方「採光」顯示亮暗分布，3D 的「日照」可以看某月某時陽光照進屋內的樣子。</li>
+        <li><b>風格與款式：</b>3D 下方「風格」會整套換材質與家具款式（日式低床、北歐錐腳沙發、侘寂雲朵沙發、工業皮沙發、輕奢弧形沙發…）；單件家具也能在右側「款式」個別指定。</li>
         <li><b>匯出回 CAD：</b>「匯出 → DXF」產生 AutoCAD 可開的圖檔（單位公分，牆、門窗、家具分圖層）。這個 DXF 再丟回來也能完整還原。</li>
         <li><b>快捷鍵：</b><span class="kbd">V</span> 選取 <span class="kbd">W</span> 牆 <span class="kbd">D</span> 門 <span class="kbd">N</span> 窗 <span class="kbd">F</span> 家具 <span class="kbd">R</span> 旋轉 <span class="kbd">Del</span> 刪除 <span class="kbd">Ctrl+Z</span> 復原 <span class="kbd">Ctrl+D</span> 複製</li>
       </ul>
@@ -407,7 +538,7 @@ class App {
         const ok = await this.choose('還原原始方案？', '目前所有修改與匯入的平面都會被取代。', [{ label: '確定還原', value: true }]);
         if (!ok) return;
         const plans = builtinPlans();
-        this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION };
+        this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION, site: this.site };
         this.history.clear();
         this.sel = null;
         this.snapshotBase();
@@ -419,6 +550,301 @@ class App {
         this.toast('已還原');
       };
     });
+  }
+
+  // ---------- 基地・採光面板 ----------
+  renderSitePanel() {
+    const el = $('#sitePanel');
+    if (!el || el.hidden) return;
+    const st = this.site, p = this.plan;
+    const opt = (list, val) => list.map(([v, t]) => `<option value="${esc(v)}"${String(v) === String(val) ? ' selected' : ''}>${esc(t)}</option>`).join('');
+    const nb = (side, f, val, unit, step = 1) => `<div class="unit"><input type="number" data-side="${side}" data-f="${f}" value="${val}" step="${step}" min="0" aria-label="${SIDE_NAMES[side]}${f === 'dist' ? '距離' : '樓層'}"><span>${unit}</span></div>`;
+    const sides = ['front', 'back', 'left', 'right'].map((side) => {
+      const sd = st.sides[side];
+      const n = { front: [0, 1], back: [0, -1], left: [-1, 0], right: [1, 0] }[side];
+      const dir = dirName(bearingOf(st, n[0], n[1]));
+      const showD = !['party', 'open'].includes(sd.type);
+      return `<div class="site-side"><div class="head"><b>${SIDE_NAMES[side]}・朝${dir}</b><small>${esc(SIDE_HINTS[side])}</small></div>
+        <select data-side="${side}" data-f="type" aria-label="${SIDE_NAMES[side]}的狀況">${opt(Object.entries(SIDE_TYPES).map(([k, v]) => [k, v.name]), sd.type)}</select>
+        ${showD ? nb(side, 'dist', sd.dist, 'm', 0.5) + nb(side, 'floors', sd.floors, '層') : sd.type === 'party' ? `<div class="note" style="grid-column:1/-1">隔壁 ${nb(side, 'floors', sd.floors, '層')}</div>` : ''}</div>`;
+    }).join('');
+    let h = `<div class="sec"><h3>基地與座向</h3>
+      <p class="note">告訴程式房子外面的狀況，它會模擬每個房間的採光、冬天與夏天的日照，並依此建議窗戶開在哪裡。</p>
+      ${this.siteDiagram()}
+      <div class="fields">
+        <div class="field"><label for="s_city">城市（決定太陽角度）</label><select id="s_city" data-site="city">${opt(Object.entries(CITIES).map(([k, v]) => [k, v[0]]), st.city)}</select></div>
+        <div class="field"><label for="s_front">正面（前陽台）朝向</label><select id="s_front" data-site="front">${opt(DIRS.map(([n, d]) => [d, '朝' + n]), st.front)}</select></div>
+        <div class="field"><label for="s_floors">這棟總共幾層</label><div class="unit"><input type="number" id="s_floors" data-site="floors" value="${st.floors}" min="1" max="30"><span>層</span></div></div>
+        <div class="field"><label for="s_gh">一樓樓高</label><div class="unit"><input type="number" id="s_gh" data-site="groundH" value="${st.groundH}" step="5" min="250"><span>cm</span></div></div>
+      </div>
+      <div class="site-sides">${sides}</div></div>`;
+    const r = this.daylight.result && this.daylight.planId === p.id ? this.daylight.result : null;
+    h += `<div class="sec"><h3>採光分析 <span class="kind-chip">${esc(p.name)} · ${floorLabel(st, p.elevation || 0)}</span></h3>
+      <div class="row"><button class="btn primary" data-sa="autoWin">依基地條件自動開窗</button>
+      <button class="btn toggle${this.daylight.show ? ' on' : ''}" data-sa="heat">平面顯示採光</button>
+      <button class="btn toggle${this.view.sunSim.on ? ' on' : ''}" data-sa="sun">3D 日照模擬</button></div>`;
+    if (this.lastWin && this.lastWin.planId === p.id) h += this.winReportHtml(this.lastWin);
+    if (!r) h += '<p class="note">計算中…</p>';
+    else {
+      const hab = r.rooms.filter((x) => ['living', 'bedroom', 'kitchen'].includes(x.kind));
+      const avg = hab.length ? hab.reduce((a, x) => a + x.df * x.area, 0) / hab.reduce((a, x) => a + x.area, 0) : 0;
+      const [g] = dfGrade(avg);
+      h += `<div class="stat"><div><b>${avg.toFixed(1)}%</b><small>居室平均採光係數（${g}）</small></div>
+        <div><b>${r.cross ? '可以' : '不行'}</b><small>${r.cross ? '前後（或左右）都有窗，能對流通風' : '只有單面開窗，通風較差'}</small></div></div>
+        <div class="dl-legend">${DF_LEGEND.map((v) => `<span style="background:${dfColor(v)}"></span>`).join('')}</div>
+        <div class="dl-legend-l"><span>暗 0%</span><span>1%</span><span>2%</span><span>亮 5%+</span></div>
+        <div class="dl-table">${r.rooms.filter((x) => x.kind !== 'stair' && (x.windows.length || ['living', 'bedroom', 'kitchen'].includes(x.kind))).map((x) => {
+          const [gg] = dfGrade(x.df);
+          const tgt = dfTarget(x.kind);
+          const notes = x.notes.slice().sort((a, b) => ({ bad: 0, warn: 1, info: 2, good: 3 }[a.lv] - { bad: 0, warn: 1, info: 2, good: 3 }[b.lv]));
+          return `<div class="dl-row" data-room="${x.id}"><b>${esc(x.name || '房間')}</b><span class="df-badge" style="background:${dfColor(x.df)}">${x.df.toFixed(1)}% ${gg}</span>
+            <div class="meta">${x.area.toFixed(1)}㎡ · 窗 ${(x.ratio * 100).toFixed(0)}%（有效 ${(x.effRatio * 100).toFixed(0)}%）· 冬至日照 ${x.sunWinter.toFixed(1)} h${tgt ? ` · 建議 ≥${tgt}%` : ''}</div>
+            ${notes.length ? `<ul>${notes.map((n) => `<li class="${n.lv}">${esc(n.t)}</li>`).join('')}</ul>` : ''}</div>`;
+        }).join('')}</div>
+        <p class="note">採光係數 DF＝室內照度／室外照度（陰天）。一般建議客廳、廚房 2% 以上、臥室 1.5% 以上。窗面積參考建築技術規則（居室採光 ≥ 樓地板 1/8、通風 ≥ 1/20），有效採光以「窗前距離／上方遮擋高度 ≥ 1/4」粗估。這是配置比較用的模擬，正式設計請由建築師檢討。</p>`;
+    }
+    h += '</div>';
+    el.innerHTML = h;
+  }
+
+  winReportHtml(rep) {
+    const rows = rep.report.filter((x) => x.added.length || x.notes.length);
+    if (!rows.length) return '';
+    return `<details class="brief" open><summary>剛才的開窗建議（${rep.added} 扇新窗${rep.removed ? `，取代 ${rep.removed} 扇舊窗` : ''}，可復原）</summary><ul>${rows.map((x) => {
+      const ws = x.added.map((a) => `${sideLabel(this.site, a.side)} 寬 ${a.w}${a.sill ? `、窗台 ${a.sill}` : ''}${a.frosted ? '、霧面' : ''}${a.shade ? '、加遮陽' : ''}`).join('；');
+      return `<li><b>${esc(x.name || '房間')}</b>：${ws || '不開窗'}${x.notes.length ? `（${esc(x.notes.join('；'))}）` : ''}</li>`;
+    }).join('')}</ul></details>`;
+  }
+
+  // 基地示意圖：房子外框、四周狀況、指北
+  siteDiagram() {
+    const st = this.site, fr = planFrame(this.plan);
+    const W = fr.maxX - fr.minX, H = fr.maxY - fr.minY;
+    const M = 520;
+    const vb = [fr.minX - M, fr.minY - M + 120, W + 2 * M, H + 2 * M - 120];
+    const band = (side) => {
+      const sd = st.sides[side];
+      const k = sd.type;
+      const far = k === 'party' ? 0 : Math.min(380, 60 + (sd.dist || 0) * 22);
+      const thick = 110;
+      const fill = k === 'open' ? 'none' : 'currentColor';
+      let r;
+      if (side === 'front') r = [fr.minX - 300, fr.maxY + far, W + 600, thick];
+      else if (side === 'back') r = [fr.minX - 300, fr.minY - far - thick, W + 600, thick];
+      else if (side === 'left') r = [fr.minX - far - thick, fr.minY - 60, thick, H + 120];
+      else r = [fr.maxX + far, fr.minY - 60, thick, H + 120];
+      const lbl = { party: '鄰房', building: '鄰房', lane: '巷', road: '馬路', open: '空地' }[k];
+      const tx = r[0] + r[2] / 2, ty = r[1] + r[3] / 2;
+      const rot = side === 'left' || side === 'right' ? ` transform="rotate(-90 ${tx} ${ty})"` : '';
+      const road = k === 'road' || k === 'lane' ? (side === 'front' ? `<rect x="${fr.minX - 300}" y="${fr.maxY + 40}" width="${W + 600}" height="${Math.max(10, far - 50)}" fill="currentColor" opacity="0.07"/>` : side === 'back' ? `<rect x="${fr.minX - 300}" y="${fr.minY - far + 10}" width="${W + 600}" height="${Math.max(10, far - 50)}" fill="currentColor" opacity="0.07"/>` : '') : '';
+      return `${road}<rect x="${r[0]}" y="${r[1]}" width="${r[2]}" height="${r[3]}" fill="${fill}" opacity="${k === 'open' ? 1 : 0.22}" stroke="currentColor" stroke-opacity="0.35" stroke-dasharray="${k === 'open' ? '30 20' : 'none'}" stroke-width="6"/>
+        <text x="${tx}" y="${ty + 30}" font-size="84" text-anchor="middle"${rot}>${lbl}${k === 'party' || k === 'open' ? '' : ` ${sd.dist}m`}</text>`;
+    };
+    const nv = sunVector(st, 0, 0);
+    const nl = Math.hypot(nv.x, nv.y) || 1;
+    const ang = Math.atan2(nv.y / nl, nv.x / nl) * 180 / Math.PI + 90;
+    const cx = fr.maxX + 330, cy = fr.minY - 230;
+    return `<svg class="site-diagram" viewBox="${vb.join(' ')}" role="img" aria-label="基地示意圖" style="color:var(--ink-2);max-height:300px">
+      ${['front', 'back', 'left', 'right'].map(band).join('')}
+      <rect x="${fr.minX}" y="${fr.minY}" width="${W}" height="${H}" fill="var(--accent-soft)" stroke="currentColor" stroke-width="10"/>
+      <text x="${(fr.minX + fr.maxX) / 2}" y="${fr.maxY - 60}" font-size="90" text-anchor="middle" fill="currentColor">前</text>
+      <text x="${(fr.minX + fr.maxX) / 2}" y="${fr.minY + 140}" font-size="90" text-anchor="middle" fill="currentColor">後</text>
+      <g transform="translate(${cx} ${cy})"><circle r="95" fill="var(--panel)" stroke="currentColor" stroke-width="6"/><path transform="rotate(${ang.toFixed(1)})" d="M0 -82 L28 30 L0 12 L-28 30Z" fill="#d94a2b"/></g>
+    </svg>`;
+  }
+
+  onSiteField(t) {
+    const st = this.site;
+    if (t.dataset.site) {
+      const k = t.dataset.site;
+      st[k] = k === 'city' ? t.value : +t.value;
+      if (k === 'floors') st.floors = Math.max(1, Math.round(st.floors || 1));
+    } else if (t.dataset.side) {
+      const sd = st.sides[t.dataset.side];
+      const f = t.dataset.f;
+      sd[f] = f === 'type' ? t.value : Math.max(0, +t.value || 0);
+      if (f === 'type' && !['party', 'open'].includes(sd.type) && !sd.dist) sd.dist = 4;
+    } else return;
+    this.lastWin = null;
+    this.siteChanged();
+    this.renderSitePanel();
+  }
+
+  onSiteClick(e) {
+    const b = e.target.closest('[data-sa]');
+    if (b) {
+      const a = b.dataset.sa;
+      if (a === 'autoWin') return this.autoWindows();
+      if (a === 'heat') return this.setDaylight(!this.daylight.show);
+      if (a === 'sun') return this.setSun(!this.view.sunSim.on);
+    }
+    const row = e.target.closest('[data-room]');
+    if (row) { this.sel = { type: 'room', id: row.dataset.room }; this.editor.render(); this.view.invalidate(); }
+  }
+
+  autoWindows() {
+    const p = this.plan;
+    const res = designWindows(p, this.site);
+    this.lastWin = { planId: p.id, report: res.report, added: res.added.length, removed: res.removed.length };
+    this.commit();
+    this.scheduleDaylight(true);
+    if (!this.daylight.show) this.setDaylight(true);
+    this.toast(res.added.length ? `已依基地條件配置 ${res.added.length} 扇窗${res.removed.length ? `（取代 ${res.removed.length} 扇舊窗）` : ''}，不滿意可以按復原` : '沒有找到可以開窗的外牆（可能都是共同壁），請先到「基地・採光」設定四周狀況', 5000);
+  }
+
+  // ---------- 自動規劃 ----------
+  genProgram() {
+    if (!this._gen) {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem('house3d.gen') || 'null'); } catch { saved = null; }
+      this._gen = { ...defaultProgram(), ...(saved || {}) };
+      this._gen.elevation = this.plan.elevation || this._gen.elevation;
+      this._gen.style = this.plan.style && this.plan.style !== 'basic' ? this.plan.style : this._gen.style;
+    }
+    return this._gen;
+  }
+
+  openGenerator() {
+    const pg = this.genProgram();
+    const st = this.site;
+    const floors = [];
+    for (let k = 2; k <= Math.max(2, st.floors); k++) floors.push([st.groundH + (k - 2) * st.floorH, `${k}F（樓板 +${st.groundH + (k - 2) * st.floorH}）`]);
+    if (!floors.some(([e]) => e === pg.elevation)) pg.elevation = floors[0][0];
+    const chip = (k, label, sub = '') => `<button type="button" class="chip${pg[k] ? ' on' : ''}" data-chip="${k}" aria-pressed="${!!pg[k]}">${label}${sub ? `<small>${sub}</small>` : ''}</button>`;
+    const step = (k, label, min, max, sub = '') => `<div class="stepper"><span>${label}${sub ? `<small>${sub}</small>` : ''}</span><button type="button" data-step="${k}" data-d="-1" aria-label="減少">−</button><output data-out="${k}">${pg[k]}</output><button type="button" data-step="${k}" data-d="1" data-max="${max}" data-min="${min}" aria-label="增加">＋</button></div>`;
+    const seg = (k, opts) => `<div class="seg mini" data-seg="${k}">${opts.map(([v, t]) => `<button type="button" data-v="${v}" class="${String(pg[k]) === String(v) ? 'on' : ''}">${t}</button>`).join('')}</div>`;
+    const sideTxt = ['front', 'back', 'left', 'right'].map((k) => `${SIDE_NAMES[k]}${SIDE_TYPES[st.sides[k].type].name.replace(/（.*）/, '')}${['party', 'open'].includes(st.sides[k].type) ? '' : ` ${st.sides[k].dist}m`}`).join('・');
+    const html = `<h2>自動規劃格局</h2>
+      <p>告訴程式這一層要放什麼。它會在固定的外牆、樓梯、電梯、天井與管道間之間，試過上百種房間配置；分數高的會實際排出牆、門、依基地條件開窗、擺家具並模擬採光，最後挑出彼此不同的幾種給你比較。</p>
+      <div class="gen">
+        <div class="gen-form">
+          <fieldset><legend>樓層與風格</legend>
+            <div class="fields">
+              <div class="field"><label for="g_floor">哪一層</label><select id="g_floor" data-sel="elevation">${floors.map(([v, t]) => `<option value="${v}"${v === pg.elevation ? ' selected' : ''}>${t}</option>`).join('')}</select></div>
+              <div class="field"><label for="g_style">裝潢風格</label><select id="g_style" data-sel="style">${Object.entries(STYLES).filter(([k]) => k !== 'basic').map(([k, v]) => `<option value="${k}"${k === pg.style ? ' selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>
+            </div>
+          </fieldset>
+          <fieldset><legend>臥室</legend>
+            <div class="chips">${chip('master', '主臥')}${chip('masterBath', '主臥套房衛浴')}${chip('elder', '長輩房')}${chip('guest', '客房')}</div>
+            ${step('kids', '小孩房', 0, 3)}
+          </fieldset>
+          <fieldset><legend>衛浴、客餐廚</legend>
+            ${step('baths', '衛浴總數', 0, 3, '含主臥套房')}
+            <div class="chips">${chip('living', '客廳')}${chip('dining', '餐廳')}${chip('island', '廚房中島')}</div>
+            <div class="row-l"><span>廚房</span>${seg('kitchen', [['open', '開放式'], ['closed', '獨立（拉門）'], ['none', '這層不要']])}</div>
+            <div class="row-l"><span>餐桌</span>${seg('seats', [[2, '2 人'], [4, '4 人'], [6, '6 人']])}</div>
+          </fieldset>
+          <fieldset><legend>其他空間</legend>
+            <div class="chips">${chip('study', '書房')}${chip('tatami', '和室')}${chip('altar', '神明廳')}${chip('walkin', '更衣室')}${chip('storage', '儲藏室')}</div>
+          </fieldset>
+          <fieldset><legend>偏好</legend>
+            <div class="chips">${chip('accessible', '長輩友善', '拉門、無障礙')}${chip('fengshui', '考慮風水')}</div>
+            <div class="row-l"><span>臥室</span>${seg('priority', [['balance', '平衡'], ['quiet', '要安靜'], ['light', '要採光']])}</div>
+          </fieldset>
+          <p class="note gen-site">基地：${esc(CITIES[st.city]?.[0] || '')}・正面朝${dirName(st.front)}・${esc(sideTxt)}　<button type="button" class="linkish" data-x="site">修改基地條件</button></p>
+          <div class="row"><button class="btn" data-x="cancel">關閉</button><button class="btn primary" data-x="run">產生方案</button></div>
+        </div>
+        <div class="gen-results" id="genResults"><div class="gen-empty"><b>還沒有結果</b><span>設定左邊的需求後按「產生方案」。</span></div></div>
+      </div>`;
+    this.modal(html, (card, close) => {
+      card.classList.add('wide');
+      const save = () => { try { localStorage.setItem('house3d.gen', JSON.stringify(pg)); } catch { /* 無法儲存 */ } };
+      card.querySelectorAll('[data-chip]').forEach((b) => b.addEventListener('click', () => {
+        const k = b.dataset.chip; pg[k] = !pg[k];
+        b.classList.toggle('on', pg[k]); b.setAttribute('aria-pressed', String(pg[k]));
+        if (k === 'masterBath' && pg[k] && pg.baths < 1) { pg.baths = 1; card.querySelector('[data-out=baths]').textContent = 1; }
+        save();
+      }));
+      card.querySelectorAll('[data-step]').forEach((b) => b.addEventListener('click', () => {
+        const k = b.dataset.step;
+        const lim = { kids: [0, 3], baths: [0, 3] }[k];
+        pg[k] = Math.max(lim[0], Math.min(lim[1], (pg[k] || 0) + +b.dataset.d));
+        card.querySelector(`[data-out=${k}]`).textContent = pg[k];
+        save();
+      }));
+      card.querySelectorAll('[data-seg]').forEach((g) => g.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+        const k = g.dataset.seg;
+        pg[k] = k === 'seats' ? +b.dataset.v : b.dataset.v;
+        g.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+        save();
+      })));
+      card.querySelectorAll('[data-sel]').forEach((s2) => s2.addEventListener('change', () => { pg[s2.dataset.sel] = s2.dataset.sel === 'elevation' ? +s2.value : s2.value; save(); }));
+      card.querySelector('[data-x=cancel]').onclick = () => close();
+      card.querySelector('[data-x=site]').onclick = () => { close(); this.setSideTab('site'); if (matchMedia('(max-width: 900px)').matches) document.querySelector('#mobileSwitch [data-show=props]')?.click(); };
+      card.querySelector('[data-x=run]').onclick = () => this.runGenerator(card, pg);
+    });
+  }
+
+  async runGenerator(card, pg) {
+    const box = card.querySelector('#genResults');
+    const btn = card.querySelector('[data-x=run]');
+    btn.disabled = true;
+    box.innerHTML = '<div class="gen-progress"><b>模擬中…</b><div class="bar"><span style="width:2%"></span></div><small>列舉格局組合…</small></div>';
+    let res;
+    try {
+      res = await generate({ ...pg }, this.site, {
+        onProgress: (f, msg) => {
+          const bar = box.querySelector('.bar span'); if (bar) bar.style.width = Math.round(f * 100) + '%';
+          const sm = box.querySelector('.gen-progress small'); if (sm) sm.textContent = msg;
+        },
+      });
+    } catch (e) {
+      console.error(e);
+      box.innerHTML = `<div class="gen-empty"><b>產生失敗</b><span>${esc(e.message || e)}</span></div>`;
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    this._genRes = res;
+    const msgs = res.msgs.map((m) => `<p class="gen-msg">${esc(m)}</p>`).join('');
+    if (!res.results.length) { box.innerHTML = msgs || '<div class="gen-empty"><b>找不到可行的格局</b></div>'; return; }
+    box.innerHTML = `<div class="gen-head"><span>試了 ${res.tried} 種配置、詳細模擬 ${res.built || ''} 種，${(res.ms / 1000).toFixed(1)} 秒。點縮圖可以放大看。</span><button class="btn" data-addall>全部加入</button></div>${msgs}
+      <div class="gen-cards">${res.results.map((r, i) => this.genCard(r, i)).join('')}</div>`;
+    box.querySelectorAll('[data-add]').forEach((b) => b.addEventListener('click', () => this.addGenerated([+b.dataset.add], card)));
+    box.querySelector('[data-addall]').onclick = () => this.addGenerated(res.results.map((_, i) => i), card);
+    box.querySelectorAll('.gen-thumb').forEach((t) => t.addEventListener('click', () => t.closest('.gen-card').classList.toggle('big')));
+  }
+
+  genCard(r, i) {
+    const p = r.built.plan;
+    const m = r.metrics;
+    const [g] = dfGrade(m.light);
+    const fsOk = r.ev.fs.filter((f) => f.ok).length, fsN = r.ev.fs.length;
+    const bullets = (p.brief || []).slice(0, 7);
+    return `<article class="gen-card">
+      <button class="gen-thumb" aria-label="放大縮圖">${planThumb(p)}</button>
+      <div class="gen-body">
+        <h3>方案 ${i + 1}<span>${esc(r.label)}</span></h3>
+        <p class="note">${esc(r.summary)}</p>
+        <div class="gen-metrics">
+          <span class="df-badge" style="background:${dfColor(m.light)}">採光 ${m.light.toFixed(1)}% ${g}</span>
+          ${this.genProgram().fengshui ? `<span class="pill ${fsOk === fsN ? 'ok' : ''}">風水 ${fsOk}/${fsN}</span>` : ''}
+          <span class="pill ${m.cross ? 'ok' : 'no'}">${m.cross ? '可對流' : '單面通風'}</span>
+          <span class="pill">室內 ${m2ToPing(r.indoor).toFixed(1)} 坪</span>
+        </div>
+        <ul>${bullets.slice(1).map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
+        <div class="row"><button class="btn primary" data-add="${i}">加入成新平面</button></div>
+      </div></article>`;
+  }
+
+  addGenerated(idxs, card) {
+    const res = this._genRes;
+    if (!res) return;
+    let last = null;
+    for (const i of idxs) {
+      const r = res.results[i];
+      if (!r || r.added) continue;
+      const p = normalizePlan(clone(r.built.plan));
+      p.id = uid('p');
+      this.project.plans.push(p);
+      r.added = true;
+      last = p;
+      card?.querySelector(`[data-add="${i}"]`)?.replaceWith(Object.assign(document.createElement('span'), { className: 'pill ok', textContent: '已加入' }));
+    }
+    if (!last) return;
+    this.save();
+    this.switchPlan(last.id);
+    this.toast(idxs.length > 1 ? `已加入 ${idxs.length} 個方案（上方分頁）` : `已加入「${last.name}」，可以直接拖拉修改`, 4000);
   }
 
   // ---------- 平面分頁 ----------
@@ -501,12 +927,14 @@ class App {
           <div class="fields">${this.sel_('類型', 'type', obj.type, Object.entries(OPENING_TYPES))}${this.num('寬度', 'w', obj.w, { step: 5, min: 20 })}
           ${this.num('高度', 'h', obj.h, { step: 5 })}${this.num('窗台高', 'sill', obj.sill || 0, { step: 5 })}
           ${this.num('距牆端', 'off', obj.pos - obj.w / 2, { step: 1 })}${this.num('距另一端', 'off2', L - obj.pos - obj.w / 2, { step: 1 })}</div>
+          ${obj.type === 'window' ? `<div class="checks"><label><input type="checkbox" data-k="frosted"${obj.frosted ? ' checked' : ''}> 霧面玻璃</label><label><input type="checkbox" data-k="shade"${obj.shade ? ' checked' : ''}> 外遮陽板</label></div>` : ''}
           <p class="note">沿著牆拖曳可移動位置，拖到另一面牆上會換牆。</p>
           <div class="row">${obj.type === 'door' ? '<button class="btn" data-a="flipSide">換開門方向</button><button class="btn" data-a="flipHinge">換鉸鏈邊</button>' : ''}<button class="btn danger" data-a="del">刪除</button></div></div>`;
       } else if (s.type === 'item') {
         const kinds = Object.entries(CATALOG).map(([k, c]) => [k, c.name]);
         h += `<div class="sec"><h3>家具／設備 <span class="kind-chip">${esc(CATALOG[obj.kind]?.group || '')}</span></h3><h2>${esc(itemName(obj))}</h2>
           <div class="fields">${this.txt('名稱', 'label', obj.label || '')}${this.sel_('種類', 'kind', obj.kind, kinds, true)}
+          ${FURN_VARIANTS[obj.kind] ? this.sel_('款式', 'variant', obj.variant || '', [['', `依風格（${FURN_VARIANTS[obj.kind][variantOf({ kind: obj.kind }, p.style)]}）`], ...Object.entries(FURN_VARIANTS[obj.kind])], true) : ''}
           ${this.num('寬', 'w', obj.w, { step: 1, min: 5 })}${this.num('深', 'd', obj.d, { step: 1, min: 5 })}
           ${this.num('高', 'h', obj.h ?? CATALOG[obj.kind]?.h ?? 60, { step: 5 })}${this.num('角度', 'rot', obj.rot || 0, { step: 15, unit: '°' })}
           ${this.num('X', 'x', obj.x)}${this.num('Y', 'y', obj.y)}
@@ -564,7 +992,7 @@ class App {
   bindProps(el) {
     const p = this.plan;
     const obj = this.findSel(this.sel);
-    el.querySelectorAll('[data-k]').forEach((inp) => inp.addEventListener('change', () => this.onField(inp.dataset.k, inp.type === 'number' ? parseFloat(inp.value) : inp.value, obj)));
+    el.querySelectorAll('[data-k]').forEach((inp) => inp.addEventListener('change', () => this.onField(inp.dataset.k, inp.type === 'number' ? parseFloat(inp.value) : inp.type === 'checkbox' ? inp.checked : inp.value, obj)));
     el.querySelectorAll('[data-s]').forEach((inp) => inp.addEventListener('change', () => { this.settings[inp.dataset.s] = inp.checked; this.editor.render(); }));
     el.querySelectorAll('[data-u]').forEach((inp) => inp.addEventListener(inp.type === 'range' ? 'input' : 'change', () => {
       const u = p.underlay;
@@ -587,7 +1015,7 @@ class App {
       this.commit();
       return;
     }
-    if (!Number.isFinite(v) && typeof v === 'number') return;
+    if (typeof v === 'number' && !Number.isFinite(v)) return;
     const t = this.sel.type;
     if (t === 'wall') {
       if (k === 'len' && v > 1) {
@@ -605,13 +1033,15 @@ class App {
         obj.type = v;
         const d = this.defaultOpening(v === 'elevator' ? 'door' : v);
         obj.h = d.h; obj.sill = d.sill;
-      } else if (k === 'off') obj.pos = v + obj.w / 2;
+      } else if (k === 'frosted' || k === 'shade') { obj[k] = v || undefined; }
+      else if (k === 'off') obj.pos = v + obj.w / 2;
       else if (k === 'off2') obj.pos = L - v - obj.w / 2;
       else if (k === 'w') { const c = obj.pos; obj.w = Math.min(v, L); obj.pos = c; }
       else obj[k] = v;
       obj.pos = Math.max(obj.w / 2, Math.min(L - obj.w / 2, obj.pos));
     } else if (t === 'item') {
       if (k === 'label') obj.label = v || undefined;
+      else if (k === 'variant') obj.variant = v || undefined;
       else if (k === 'kind') {
         obj.kind = v;
         const c = CATALOG[v];

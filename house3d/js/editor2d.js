@@ -6,6 +6,8 @@ import {
 } from './model.js';
 import { CATALOG, itemName } from './catalog.js';
 import { detectRoom } from './geometry.js';
+import { variantOf } from './styles.js';
+import { dfColor, sunPatches, sunVector, planFrame, bearingOf, dirName, SIDE_NAMES, SIDE_TYPES } from './site.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -104,6 +106,7 @@ export class Editor2D {
       out.push(`<polygon points="${pts(r.pts)}" fill="${col}" class="room${on ? ' sel' : ''}" data-hit="room" data-id="${r.id}"/>`);
     }
     out.push('</g>');
+    out.push(this.daylightSvg(fs));
     // 家具
     out.push('<g class="items">');
     for (const it of plan.items) out.push(this.itemSvg(it, sel?.type === 'item' && sel.id === it.id));
@@ -151,7 +154,7 @@ export class Editor2D {
       }
       if (st.itemLabels) {
         for (const it of plan.items) {
-          if (['chair', 'acout', 'duct', 'stair', 'elevator', 'rug', 'lamp'].includes(it.kind)) continue;
+          if (['chair', 'acout', 'duct', 'stair', 'elevator', 'rug', 'lamp', 'stool', 'plant'].includes(it.kind)) continue;
           const small = Math.min(fs * 0.75, Math.min(it.w, it.d) * 0.45 + 4);
           if (small < this.px(7)) continue;
           out.push(`<text x="${f1(it.x)}" y="${f1(it.y + small * 0.35)}" font-size="${f1(small)}" class="item-name">${esc(itemName(it))}</text>`);
@@ -165,6 +168,60 @@ export class Editor2D {
     out.push(this.draftSvg(fs));
     this.svg.innerHTML = out.join('');
     this.app.onRender2D?.();
+  }
+
+  // 採光模擬：色塊、各房間平均值、日照光斑、座向與四周說明
+  daylightSvg(fs) {
+    const app = this.app, dl = app.daylight;
+    if (!dl?.show || !dl.result || dl.planId !== app.plan.id) return '';
+    const r = dl.result, st = r.step;
+    const out = ['<g class="daylight" pointer-events="none">'];
+    out.push('<g opacity="0.62" shape-rendering="crispEdges">');
+    for (const g of r.grid) out.push(`<rect x="${f1(g.x - st / 2)}" y="${f1(g.y - st / 2)}" width="${st + 0.6}" height="${st + 0.6}" fill="${dfColor(g.df)}"/>`);
+    out.push('</g>');
+    // 日照光斑（3D 日照模擬開啟時）
+    const sim = app.view?.sunSim;
+    if (sim?.on && app.view.sunInfo) {
+      const sv = sunVector(app.site, app.view.sunInfo.alt, app.view.sunInfo.az);
+      const patches = sunPatches(r, sv);
+      patches.forEach((sp, i) => {
+        const w = sp.win;
+        const probe = { x: w.inner.x - w.n.x * 20, y: w.inner.y - w.n.y * 20 };
+        const room = app.plan.rooms.find((rm) => rm.kind !== 'void' && rm.pts.length > 2 && pointInPolygon(probe, rm.pts));
+        if (room) out.push(`<clipPath id="spc${i}"><polygon points="${pts(room.pts)}"/></clipPath>`);
+        out.push(`<polygon points="${pts(sp.pts)}" class="sun-patch"${room ? ` clip-path="url(#spc${i})"` : ''}/>`);
+      });
+    }
+    // 各房間平均採光係數
+    for (const rr of r.rooms) {
+      const room = app.plan.rooms.find((x) => x.id === rr.id);
+      if (!room || rr.kind === 'stair' || (!rr.windows.length && rr.df < 0.05)) continue;
+      const c = room.label || polygonCentroid(room.pts);
+      out.push(`<text x="${f1(c.x)}" y="${f1(c.y + fs * 2.35)}" font-size="${f1(fs * 0.85)}" class="dl-text">DF ${rr.df.toFixed(1)}%</text>`);
+    }
+    // 四周狀況與指北
+    const fr = planFrame(app.plan), site = app.site;
+    const cx = (fr.minX + fr.maxX) / 2, cy = (fr.minY + fr.maxY) / 2;
+    const lab = (side) => {
+      const sd = site.sides[side];
+      const n = { front: [0, 1], back: [0, -1], left: [-1, 0], right: [1, 0] }[side];
+      const dir = dirName(bearingOf(site, n[0], n[1]));
+      const t = SIDE_TYPES[sd.type]?.name.replace(/（.*）/, '') || '';
+      const extra = sd.type === 'party' || sd.type === 'open' ? '' : ` ${sd.dist} m・對面 ${sd.floors} 層`;
+      return `${SIDE_NAMES[side]}朝${dir}：${t}${extra}`;
+    };
+    const fz = f1(fs * 0.9);
+    out.push(`<text x="${f1(cx)}" y="${f1(fr.maxY + 172 + fs * 2)}" font-size="${fz}" class="site-lbl" text-anchor="middle">${esc(lab('front'))}</text>`);
+    out.push(`<text x="${f1(cx)}" y="${f1(fr.minY - 131 - fs * 1.2)}" font-size="${fz}" class="site-lbl" text-anchor="middle">${esc(lab('back'))}</text>`);
+    out.push(`<text transform="translate(${f1(fr.minX - fs * 1.4)} ${f1(cy)}) rotate(-90)" font-size="${fz}" class="site-lbl" text-anchor="middle">${esc(lab('left'))}</text>`);
+    out.push(`<text transform="translate(${f1(fr.maxX + fs * 1.4)} ${f1(cy)}) rotate(90)" font-size="${fz}" class="site-lbl" text-anchor="middle">${esc(lab('right'))}</text>`);
+    const nv = sunVector(site, 0, 0);
+    const nl = Math.hypot(nv.x, nv.y) || 1;
+    const ang = Math.atan2(nv.y / nl, nv.x / nl) * 180 / Math.PI + 90;
+    const R = fs * 1.6, ox = fr.maxX + R * 2.6, oy = fr.minY + R * 1.4;
+    out.push(`<g class="compass" transform="translate(${f1(ox)} ${f1(oy)})"><circle r="${f1(R)}" vector-effect="non-scaling-stroke"/><path transform="rotate(${f1(ang)})" d="M 0 ${f1(-R * 0.92)} L ${f1(R * 0.32)} ${f1(R * 0.35)} L 0 ${f1(R * 0.12)} L ${f1(-R * 0.32)} ${f1(R * 0.35)} Z"/><text x="${f1(Math.cos((ang - 90) * Math.PI / 180) * R * 1.45)}" y="${f1(Math.sin((ang - 90) * Math.PI / 180) * R * 1.45 + fs * 0.35)}" font-size="${f1(fs)}">北</text></g>`);
+    out.push('</g>');
+    return out.join('');
   }
 
   defs() {
@@ -234,6 +291,21 @@ export class Editor2D {
     const c = (x, y, rr, cls = '') => `<circle cx="${f1(x)}" cy="${f1(y)}" r="${f1(rr)}" class="${cls}" vector-effect="non-scaling-stroke"/>`;
     const el = (x, y, rx, ry, cls = '') => `<ellipse cx="${f1(x)}" cy="${f1(y)}" rx="${f1(rx)}" ry="${f1(ry)}" class="${cls}" vector-effect="non-scaling-stroke"/>`;
     let s = '';
+    const v = variantOf(it, this.app.plan?.style || 'basic');
+    const round = { coffee: ['roundwood', 'tripod', 'drum'], table: ['oval'], armchair: ['tub', 'club', 'shell'], nightstand: ['roundleg', 'stone', 'marble'] }[it.kind];
+    if (round?.includes(v)) {
+      s += el(0, 0, hw, hd, 'body');
+      if (it.kind === 'armchair') s += el(0, hd * 0.12, hw * 0.62, hd * 0.6, 'soft');
+      return `<g class="item k-${it.kind}${on ? ' sel' : ''}" transform="translate(${f1(it.x)} ${f1(it.y)}) rotate(${f1(it.rot || 0)})" data-hit="item" data-id="${it.id}"><rect x="${f1(-hw)}" y="${f1(-hd)}" width="${f1(w)}" height="${f1(d)}" class="item-hit"/>${s}</g>`;
+    }
+    if (it.kind === 'sofa' && v === 'curved') {
+      const sg = Math.min(26, d * 0.3);
+      const R = (hw * hw + sg * sg) / (2 * sg);
+      const back = `M ${f1(-hw)} ${f1(-hd + sg)} A ${f1(R)} ${f1(R)} 0 0 1 ${f1(hw)} ${f1(-hd + sg)}`;
+      s += `<path d="${back} L ${f1(hw * 0.97)} ${f1(hd - 2)} A ${f1(R)} ${f1(R)} 0 0 0 ${f1(-hw * 0.97)} ${f1(hd - 2)} Z" class="body" vector-effect="non-scaling-stroke"/>`;
+      s += `<path d="M ${f1(-hw + 10)} ${f1(-hd + sg + 12)} A ${f1(R - 16)} ${f1(R - 16)} 0 0 1 ${f1(hw - 10)} ${f1(-hd + sg + 12)}" class="soft" vector-effect="non-scaling-stroke"/>`;
+      return `<g class="item k-${it.kind}${on ? ' sel' : ''}" transform="translate(${f1(it.x)} ${f1(it.y)}) rotate(${f1(it.rot || 0)})" data-hit="item" data-id="${it.id}"><rect x="${f1(-hw)}" y="${f1(-hd)}" width="${f1(w)}" height="${f1(d)}" class="item-hit"/>${s}</g>`;
+    }
     switch (it.kind) {
       case 'bed':
       case 'bed_single': {
@@ -255,11 +327,11 @@ export class Editor2D {
         if (it.kind === 'tv') s += r(-hw * 0.8, -hd + 3, w * 0.8, 6, 'dark');
         break;
       case 'chair':
-        s += r(-hw + 3, -hd + 3, w - 6, d - 6, 'body', 4);
+        s += r(-hw + 3, -hd + 3, w - 6, d - 6, 'body', ['shell', 'tolix', 'velvet', 'wishbone'].includes(v) ? 12 : 4);
         s += l(-hw + 3, -hd + 8, hw - 3, -hd + 8, 'thick');
         break;
       case 'sofa':
-        s += r(-hw, -hd, w, d, 'body', 6);
+        s += r(-hw, -hd, w, d, 'body', v === 'cloud' ? 16 : 6);
         s += r(-hw + 12, -hd + 18, w - 24, d - 22, 'soft', 4);
         break;
       case 'toilet':
@@ -326,10 +398,10 @@ export class Editor2D {
         s += r(-hw + 10, -hd + 16, w - 20, d - 20, 'soft', 5);
         break;
       case 'coffee':
-        s += r(-hw, -hd, w, d, 'body', Math.min(hw, hd) * 0.3);
+        s += r(-hw, -hd, w, d, 'body', v === 'block' ? 8 : Math.min(hw, hd) * 0.3);
         break;
       case 'rug':
-        s += r(-hw, -hd, w, d, 'rug dash', 4);
+        s += r(-hw, -hd, w, d, 'rug dash', v === 'organic' ? Math.min(hw, hd) * 0.7 : 4);
         break;
       case 'shelf':
       case 'cabinet':
@@ -345,6 +417,23 @@ export class Editor2D {
       case 'island':
         s += r(-hw, -hd, w, d, 'body');
         s += l(-hw, hd - 25, hw, hd - 25, 'thin faint');
+        break;
+      case 'tatami': {
+        s += r(-hw, -hd, w, d, 'body');
+        const n = Math.max(1, Math.round(Math.max(w, d) / 90));
+        for (let i = 1; i < n; i++) s += w >= d ? l(-hw + i * w / n, -hd, -hw + i * w / n, hd, 'thin') : l(-hw, -hd + i * d / n, hw, -hd + i * d / n, 'thin');
+        break;
+      }
+      case 'lowtable':
+        s += r(-hw, -hd, w, d, 'body', 3);
+        break;
+      case 'stool':
+        s += c(0, 0, Math.min(hw, hd), 'body');
+        break;
+      case 'altar':
+        s += r(-hw, -hd, w, Math.min(d, 60), 'body');
+        s += r(-hw * 0.86, -hd + Math.min(d, 60) + 4, w * 0.86, Math.max(20, d - Math.min(d, 60) - 4), 'body');
+        s += r(-w * 0.2, -hd + 2, w * 0.4, 30, 'soft');
         break;
       case 'stair':
         s += this.stairSvg(it);

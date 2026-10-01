@@ -4,7 +4,7 @@
 import { uid, DEFAULTS, normalizePlan } from './model.js';
 import { CATALOG } from './catalog.js';
 
-function builder(meta) {
+export function builder(meta) {
   const plan = { id: uid('p'), ...meta, walls: [], openings: [], rooms: [], items: [] };
   const H = meta.wallHeight;
 
@@ -54,7 +54,7 @@ function builder(meta) {
 }
 
 // 固定不動的結構：外牆、前後陽台、AC 版、樓梯、電梯、天井
-function core(b, opt) {
+export function core(b, opt) {
   const { W, O, I, R } = b;
   const ext = { kind: 'ext' };
   const par = { kind: 'parapet', h: DEFAULTS.parapet };
@@ -295,7 +295,8 @@ export function planC() {
 // ======================================================================
 // 優化提案：在不動外牆、樓梯、電梯、天井與三個管道間的前提下重新配置
 // ======================================================================
-const DUCTS = (I) => {
+export const DUCT_RECTS = [[10, 588, 58, 655], [9, 906, 58, 955], [543, 897, 591, 955]];
+export const DUCTS = (I) => {
   I('duct', 10, 588, 58, 655, 'S', { h: 300 });
   I('duct', 9, 906, 58, 955, 'S', { h: 300 });
   I('duct', 543, 897, 591, 955, 'S', { h: 300 });
@@ -323,7 +324,7 @@ function masterSuiteBack(b, { doorType = 'door' } = {}) {
   I('shower', 64, 566, 172, 678, 'N', { label: '淋浴（乾濕分離）' });
 }
 
-function laundryBack(I) {
+export function laundryBack(I) {
   I('washer', 6, -124, 66, -64, 'S');
   I('laundry', 135, -124, 185, -79, 'S', { label: '洗衣台' });
 }

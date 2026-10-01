@@ -4,9 +4,10 @@ import { OrbitControls } from 'three/addons/OrbitControls.js';
 import {
   wallFrame, wallSegments, wallExtents, openingEnds, polygonCentroid, areaM2, ROOM_KINDS, planBounds, itemCorners,
 } from './model.js';
-import { itemHeight, itemElev, itemName } from './catalog.js';
-import { stairGeometry } from './editor2d.js';
+import { itemHeight, itemElev } from './catalog.js';
 import { STYLES } from './styles.js';
+import { buildItem, buildPendants } from './furniture3d.js';
+import { latOf, sunPosition, sunVector, planFrame, buildingTop, roofLevel, STOREY_H } from './site.js';
 
 const SLAB = 15;
 
@@ -35,6 +36,7 @@ export class View3D {
     this.controls.addEventListener('start', () => { this.userMoved = true; });
 
     const hemi = new THREE.HemisphereLight(0xfbf8f2, 0x9c9486, 1.35);
+    this.hemi = hemi;
     this.scene.add(hemi);
     this.sun = new THREE.DirectionalLight(0xfff3e2, 2.3);
     this.sun.castShadow = true;
@@ -44,7 +46,17 @@ export class View3D {
     this.scene.add(this.sun, this.sun.target);
     const fill = new THREE.DirectionalLight(0xdde6ff, 0.45);
     fill.position.set(10, 8, 20);
+    this.fill = fill;
     this.scene.add(fill);
+    this.shadowOnly = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+    this.ctxMats = {
+      mass: new THREE.MeshStandardMaterial({ color: 0xcfcac0, roughness: 1 }),
+      neighbor: new THREE.MeshStandardMaterial({ color: 0xaeb3b8, roughness: 1, transparent: true, opacity: 0.16, depthWrite: false }),
+      edge: new THREE.LineBasicMaterial({ color: 0x7d838a, transparent: true, opacity: 0.55 }),
+      road: new THREE.MeshStandardMaterial({ color: 0x6d7074, roughness: 1 }),
+      mark: new THREE.MeshBasicMaterial({ color: 0xd94a2b }),
+    };
+    this.sunSim = { on: false, month: 12, hour: 10 };
 
     this.ground = new THREE.Mesh(new THREE.CircleGeometry(60, 64), new THREE.MeshStandardMaterial({ color: 0xd8d3c8, roughness: 1 }));
     this.ground.rotation.x = -Math.PI / 2;
@@ -132,6 +144,7 @@ export class View3D {
     this.clearRoot();
     const M = this.mats;
     const cut = this.cutHeight;
+    const sunOn = this.sunSim.on;
 
     // 樓板＋地坪
     for (const r of plan.rooms) {
@@ -141,7 +154,7 @@ export class View3D {
         const g = new THREE.ShapeGeometry(shape);
         g.rotateX(Math.PI / 2);
         const m = new THREE.Mesh(g, M.voidFloor);
-        m.position.y = -140;
+        m.position.y = sunOn ? -(plan.elevation || 0) + 2 : -140;
         this.root.add(m);
         continue;
       }
@@ -155,7 +168,8 @@ export class View3D {
     }
 
     // 牆
-    for (const w of plan.walls) this.buildWall(plan, w, cut);
+    for (const w of plan.walls) this.buildWall(plan, w, cut, sunOn);
+    if (sunOn) this.buildContext(plan, cut);
 
     // 家具
     for (const it of plan.items) {
@@ -166,6 +180,10 @@ export class View3D {
       g.userData.itemId = it.id;
       this.root.add(g);
       this.itemGroups.set(it.id, g);
+      if ((it.kind === 'table' || it.kind === 'island') && it.pendant !== false) {
+        const pg = buildPendants(plan, it, M, cut);
+        if (pg) { g.add(pg); pg.position.y = -itemElev(it); }
+      }
     }
 
     // 標籤
@@ -182,38 +200,170 @@ export class View3D {
 
     this.updateSelection();
     this.fitShadows(plan);
+    this.updateSun();
     if (this.first) { this.first = false; this.setView('iso', true); }
   }
 
-  buildWall(plan, w, cut) {
+  // ---------- 日照模擬：周邊建物、下方樓層、只投影不顯示的天花板與上半段牆 ----------
+  buildContext(plan, cut) {
+    const site = this.app.site;
+    const fr = planFrame(plan);
+    const elev = plan.elevation || 0;
+    const H = plan.wallHeight || 300;
+    const C = this.ctxMats;
+    const add = (geo, mat, x, y, z, { cast = true, recv = true } = {}) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z);
+      m.castShadow = cast; m.receiveShadow = recv;
+      m.userData.ctx = true;
+      this.root.add(m);
+      return m;
+    };
+    const box = (x0, x1, y0, y1, z0, z1, mat, opt) => {
+      if (x1 - x0 < 1 || y1 - y0 < 1 || z1 - z0 < 1) return null;
+      const geo = new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0);
+      const m = add(geo, mat, (x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2, opt);
+      if (mat === C.neighbor) {
+        const e = new THREE.LineSegments(new THREE.EdgesGeometry(geo), C.edge);
+        e.position.copy(m.position);
+        e.userData.ctx = true;
+        this.root.add(e);
+      }
+      return m;
+    };
+    // 外框（扣掉天井）擠出
+    const voids = plan.rooms.filter((r) => r.kind === 'void' && r.pts.length >= 3);
+    const footprint = (y0, y1, mat, opt) => {
+      if (y1 - y0 < 1) return;
+      const sh = new THREE.Shape([new THREE.Vector2(fr.minX - 9, fr.minY - 9), new THREE.Vector2(fr.maxX + 9, fr.minY - 9), new THREE.Vector2(fr.maxX + 9, fr.maxY + 9), new THREE.Vector2(fr.minX - 9, fr.maxY + 9)]);
+      for (const v of voids) sh.holes.push(new THREE.Path(v.pts.map((p) => new THREE.Vector2(p.x, p.y))));
+      const g = new THREE.ExtrudeGeometry(sh, { depth: y1 - y0, bevelEnabled: false });
+      g.rotateX(Math.PI / 2);
+      const m = add(g, mat, 0, y1, 0, opt);
+      return m;
+    };
+    // 下方樓層
+    if (elev > 20) footprint(-elev, -SLAB - 0.5, C.mass);
+    // 天花板＋上方樓層（不顯示，只擋陽光）
+    const top = buildingTop(site) - elev;
+    footprint(H, Math.max(H + 15, top), this.shadowOnly, { recv: false });
+    // 樓上陽台板＝雨遮
+    if (elev + (plan.floorHeight || 350) < roofLevel(site) - 1) {
+      for (const r of plan.rooms) {
+        if (r.kind !== 'balcony' || r.pts.length < 3) continue;
+        const sh = new THREE.Shape(r.pts.map((p) => new THREE.Vector2(p.x, p.y)));
+        const g = new THREE.ExtrudeGeometry(sh, { depth: 15, bevelEnabled: false });
+        g.rotateX(Math.PI / 2);
+        add(g, this.shadowOnly, 0, (plan.floorHeight || 350), 0, { recv: false });
+      }
+    }
+    // 地面、道路與鄰房
+    const g0 = -elev;
+    const W = 3000;
+    for (const side of ['front', 'back', 'left', 'right']) {
+      const sd = site.sides[side];
+      if (!sd || sd.type === 'open') continue;
+      const hgt = Math.max(1, sd.floors || 0) * STOREY_H;
+      const dist = sd.type === 'party' ? 0 : Math.max(0.5, sd.dist || 0) * 100;
+      const deep = 900;
+      if (side === 'front') {
+        if (sd.type === 'road') box(fr.minX - W, fr.maxX + W, g0 - 2, g0 + 1, fr.maxY + 180, fr.maxY + dist, C.road, { cast: false });
+        box(fr.minX - W, fr.maxX + W, g0, g0 + hgt, fr.maxY + dist, fr.maxY + dist + deep, C.neighbor);
+      } else if (side === 'back') {
+        box(fr.minX - W, fr.maxX + W, g0, g0 + hgt, fr.minY - dist - deep, fr.minY - dist, C.neighbor);
+      } else if (side === 'left') {
+        box(fr.minX - dist - 600, fr.minX - dist - (sd.type === 'party' ? 9 : 0), g0, g0 + hgt, fr.minY, fr.maxY, C.neighbor);
+      } else {
+        box(fr.maxX + dist + (sd.type === 'party' ? 9 : 0), fr.maxX + dist + 600, g0, g0 + hgt, fr.minY, fr.maxY, C.neighbor);
+      }
+    }
+    // 指北針
+    const north = sunVector(site, 0, 0);
+    const len = Math.hypot(north.x, north.y) || 1;
+    const nx = north.x / len, nz = north.y / len;
+    const cx = fr.maxX + 140, cz = fr.maxY + 60;
+    const arrow = new THREE.Shape([new THREE.Vector2(0, -70), new THREE.Vector2(22, 30), new THREE.Vector2(0, 14), new THREE.Vector2(-22, 30)]);
+    const ag = new THREE.ShapeGeometry(arrow);
+    ag.rotateX(Math.PI / 2);
+    const am = add(ag, C.mark, cx, 3, cz, { cast: false, recv: false });
+    am.rotation.y = Math.atan2(-nx, -nz) + Math.PI;
+    am.material.side = THREE.DoubleSide;
+    void cut;
+  }
+
+  updateSun() {
+    const plan = this.app.plan;
+    if (!plan) return;
+    const on = this.sunSim.on;
+    this.ground.position.y = on ? -(plan.elevation || 0) / 100 - 0.02 : -(SLAB + 1) / 100;
+    if (!on) {
+      this.hemi.intensity = 1.35; this.fill.intensity = 0.45; this.sun.intensity = 2.3;
+      this.sun.position.set(this.center.x - 9, 22, this.center.z - 12);
+      return;
+    }
+    const site = this.app.site;
+    const day = Math.round((this.sunSim.month - 1) * 30.42 + 21);
+    const { alt, az } = sunPosition(latOf(site), day, this.sunSim.hour);
+    this.sunInfo = { alt, az, day };
+    const v = sunVector(site, alt, az);
+    const c = this.center;
+    const D = 40;
+    this.sun.position.set(c.x + v.x * D, Math.max(0.2, v.z) * D, c.z + v.y * D);
+    this.sun.target.position.set(c.x, 0, c.z);
+    const up = Math.max(0, Math.sin(alt));
+    this.sun.intensity = alt > 0 ? 1.2 + 2.6 * Math.min(1, up * 2.2) : 0;
+    this.sun.color.setHSL(0.09, alt > 0.35 ? 0.35 : 0.75, 0.62 + 0.2 * Math.min(1, up * 2));
+    this.hemi.intensity = alt > 0 ? 0.55 + 0.35 * up : 0.25;
+    this.fill.intensity = 0.08;
+    const cam = this.sun.shadow.camera;
+    const R = Math.max(this.radius, 12);
+    cam.left = -R; cam.right = R; cam.top = R; cam.bottom = -R; cam.near = 1; cam.far = 120;
+    cam.updateProjectionMatrix();
+    this.app.onSunUpdate?.(this.sunInfo);
+  }
+
+  setSunSim(patch) {
+    const was = this.sunSim.on;
+    Object.assign(this.sunSim, patch);
+    if (was !== this.sunSim.on || patch.rebuild) this.invalidate();
+    else this.updateSun();
+  }
+
+  buildWall(plan, w, cut, sunOn = false) {
     const M = this.mats;
     const { L, u } = wallFrame(w);
     if (L < 0.5) return;
-    const H = Math.min(w.h ?? plan.wallHeight, cut ?? Infinity);
+    const Hfull = w.h ?? plan.wallHeight;
+    const H = Math.min(Hfull, cut ?? Infinity);
     const { extA, extB } = wallExtents(plan, w);
     const ang = Math.atan2(u.y, u.x);
     const selected = this.app.sel?.type === 'wall' && this.app.sel.id === w.id;
     const side = selected ? M.wallSel : (w.kind === 'parapet' ? M.parapet : M.wall);
     const mats = [side, side, M.cap, side, side, side];
-    const addBox = (s, e, y0, y1) => {
+    const addBox = (s, e, y0, y1, ghost = false) => {
       if (e - s < 0.3 || y1 - y0 < 0.3) return;
       const g = new THREE.BoxGeometry(e - s, y1 - y0, w.t);
-      const m = new THREE.Mesh(g, mats);
+      const m = new THREE.Mesh(g, ghost ? this.shadowOnly : mats);
       const mid = (s + e) / 2;
       m.position.set(w.a.x + u.x * mid, (y0 + y1) / 2, w.a.y + u.y * mid);
       m.rotation.y = -ang;
-      m.castShadow = true; m.receiveShadow = true;
-      m.userData = { kind: 'wall', id: w.id };
+      m.castShadow = true; m.receiveShadow = !ghost;
+      m.userData = ghost ? { ghost: true } : { kind: 'wall', id: w.id };
       this.root.add(m);
+    };
+    // 剖切線以上的牆：日照模擬時保留成看不見、但會擋陽光的量體
+    const piece = (s, e, y0, y1) => {
+      addBox(s, e, y0, Math.min(y1, H));
+      if (sunOn && y1 > H) addBox(s, e, Math.max(y0, H), y1, true);
     };
     for (const sg of wallSegments(plan, w)) {
       const s = sg.s - (sg.s <= 0.01 ? extA : 0), e = sg.e + (sg.e >= L - 0.01 ? extB : 0);
-      if (sg.solid) { addBox(s, e, -SLAB, H); continue; }
+      if (sg.solid) { piece(s, e, -SLAB, Hfull); continue; }
       const o = sg.opening;
       const sill = o.sill || 0, top = sill + (o.h || 210);
-      addBox(s, e, -SLAB, Math.min(sill, H));
-      if (top < H) addBox(s, e, top, H);
-      this.buildOpening(plan, o, w, Math.min(top, H), sill, H);
+      piece(s, e, -SLAB, Math.min(sill, Hfull));
+      if (top < Hfull) piece(s, e, top, Hfull);
+      if (sill < H) this.buildOpening(plan, o, w, Math.min(top, H), sill, H);
     }
   }
 
@@ -226,7 +376,7 @@ export class View3D {
     const hgt = Math.max(0, top - sill);
     if (hgt < 1) return;
     const selected = this.app.sel?.type === 'opening' && this.app.sel.id === o.id;
-    const tag = (m) => { m.userData = { kind: 'opening', id: o.id }; m.castShadow = true; return m; };
+    const tag = (m) => { const ns = !!m.userData.noShadow; m.userData = { kind: 'opening', id: o.id, noShadow: ns }; m.castShadow = !ns; return m; };
     const place = (m, along, off, y) => {
       m.position.set(w.a.x + u.x * along + n.x * off, y, w.a.y + u.y * along + n.y * off);
       m.rotation.y = -ang;
@@ -266,8 +416,14 @@ export class View3D {
         fr.geometry.dispose();
       }
     } else if (o.type === 'window') {
-      const glass = new THREE.Mesh(new THREE.BoxGeometry(o.w - 2, hgt - 2, 1.5), selected ? M.accentGlass : M.glass);
+      const glass = new THREE.Mesh(new THREE.BoxGeometry(o.w - 2, hgt - 2, 1.5), selected ? M.accentGlass : o.frosted ? M.glassFrost : M.glass);
+      glass.userData.noShadow = true;
       place(glass, o.pos, 0, sill + hgt / 2);
+      if (o.shade && w.kind === 'ext') {
+        const sgn = this.outSide(plan, w, n);
+        const fin = new THREE.Mesh(new THREE.BoxGeometry(o.w + 30, 4, 45), M.metal);
+        place(fin, o.pos, sgn * (w.t / 2 + 22), Math.min(top + 8, H - 2));
+      }
       const box = new THREE.BoxGeometry(o.w - 1, hgt - 1, 4);
       const edges = new THREE.LineSegments(new THREE.EdgesGeometry(box), M.aluLine);
       place(edges, o.pos, 0, sill + hgt / 2);
@@ -280,6 +436,14 @@ export class View3D {
         place(p, o.pos + k * o.w / 4, -(w.t / 2 - 2) * 0, sill + hgt / 2);
       }
     }
+  }
+
+  // 外牆的室外側：+1 表示法線 n 方向是室外
+  outSide(plan, w, n) {
+    const b = planBounds(plan);
+    const m = { x: (w.a.x + w.b.x) / 2, y: (w.a.y + w.b.y) / 2 };
+    const c = { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+    return (m.x - c.x) * n.x + (m.y - c.y) * n.y >= 0 ? 1 : -1;
   }
 
   fitShadows(plan) {
@@ -581,6 +745,11 @@ function floorMat(std, f) {
 function makeMaterials(styleKey = 'basic') {
   const S = STYLES[styleKey] || STYLES.basic;
   const std = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...extra });
+  const glow = (color, k = 0.55) => new THREE.MeshStandardMaterial({ color, roughness: 0.9, emissive: new THREE.Color(color), emissiveIntensity: k });
+  const repeat1 = (t) => { t.repeat.set(1, 1); return t; };
+  const counterTop = S.counterTex === 'marble' ? std(0xffffff, { map: repeat1(marbleTex(S.counterTop, '#b9b0a3', 120)), roughness: 0.25 })
+    : S.counterTex === 'concrete' ? std(0xffffff, { map: repeat1(concreteTex(S.counterTop)), roughness: 0.7 })
+      : std(S.counterTop, { roughness: 0.4 });
   return {
     wall: std(S.walls, { roughness: 0.95 }),
     wallSel: std(0xf2d95c, { roughness: 0.9 }),
@@ -603,6 +772,10 @@ function makeMaterials(styleKey = 'basic') {
     door: std(S.door, { roughness: 0.6 }),
     frame: std(S.frame),
     glass: new THREE.MeshPhysicalMaterial({ color: 0xcfe6ee, roughness: 0.05, transmission: 0, transparent: true, opacity: 0.28, depthWrite: false }),
+    glassFrost: new THREE.MeshPhysicalMaterial({ color: 0xf4f6f6, roughness: 0.6, transparent: true, opacity: 0.72, depthWrite: false }),
+    glassDark: new THREE.MeshStandardMaterial({ color: 0x3d4a50, roughness: 0.1, metalness: 0.3, transparent: true, opacity: 0.55 }),
+    mirror: std(0xdfe8ec, { roughness: 0.05, metalness: 0.9 }),
+    screen: std(0x1d2733, { roughness: 0.15, metalness: 0.2 }),
     accentGlass: new THREE.MeshPhysicalMaterial({ color: 0xf2d95c, transparent: true, opacity: 0.5, depthWrite: false }),
     alu: std(0x8d949a, { metalness: 0.6, roughness: 0.35 }),
     aluLine: new THREE.LineBasicMaterial({ color: 0x6d747a }),
@@ -620,17 +793,44 @@ function makeMaterials(styleKey = 'basic') {
     fabric3: std(S.fabric3, { roughness: 1 }),
     sofa: std(S.sofa, { roughness: 1 }),
     rug: std(S.rug, { roughness: 1 }),
+    bedding: std(S.bedding, { roughness: 1 }),
+    throw: std(S.throw, { roughness: 1 }),
+    leather: std(S.leather, { roughness: 0.48, metalness: 0.05 }),
+    brass: std(S.brass, { roughness: 0.32, metalness: 0.85 }),
+    paper: glow(S.paper, 0.6),
+    cane: std(S.cane, { roughness: 0.9 }),
+    plaster: std(S.plaster, { roughness: 1 }),
+    kitchenFront: std(S.kitchenFront, { roughness: 0.55 }),
+    counterTop,
+    marble: std(0xffffff, { map: repeat1(marbleTex('#efebe5', '#b8afa2', 120)), roughness: 0.22 }),
+    tatami: std(0xffffff, { map: repeat1(tatamiTex()), roughness: 0.9 }),
+    altarWood: std(0x5e2419, { roughness: 0.45 }),
+    redGlow: glow('#d8402a', 0.8),
     stone: std(S.stone, { roughness: 0.45 }),
     metal: std(S.metal, { roughness: 0.35, metalness: 0.6 }),
-    lampShade: new THREE.MeshStandardMaterial({ color: S.lampShade, roughness: 0.9, emissive: new THREE.Color(S.lampShade), emissiveIntensity: 0.35 }),
+    lampShade: new THREE.MeshStandardMaterial({ color: S.lampShade, roughness: 0.9, emissive: new THREE.Color(S.lampShade), emissiveIntensity: 0.35, side: THREE.DoubleSide }),
     dark: std(0x2b2e33, { roughness: 0.5 }),
     black: std(0x151618, { roughness: 0.3 }),
     concrete: std(0xb9b5ad, { roughness: 1 }),
     stainless: std(0xc9ced2, { metalness: 0.8, roughness: 0.25 }),
-    plant: std(0x5d8a57, { roughness: 1 }),
-    pot: std(0xb56d4b, { roughness: 0.9 }),
+    plant: std(S.foliage, { roughness: 0.9 }),
+    pot: std(S.pot, { roughness: 0.7, metalness: S.pot === S.brass ? 0.7 : 0 }),
     water: std(0xbfdbe6, { roughness: 0.1 }),
   };
+}
+
+function tatamiTex() {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#cdc28a'; g.fillRect(0, 0, 128, 256);
+  g.strokeStyle = 'rgba(90,80,30,0.25)'; g.lineWidth = 1;
+  for (let y = 2; y < 256; y += 3) { g.beginPath(); g.moveTo(10, y); g.lineTo(118, y); g.stroke(); }
+  g.fillStyle = '#2f3330'; g.fillRect(0, 0, 9, 256); g.fillRect(119, 0, 9, 256);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
 }
 
 function disposeMaterials(M) {
@@ -640,220 +840,6 @@ function disposeMaterials(M) {
     else if (v && typeof v === 'object') for (const x of Object.values(v)) if (x?.isMaterial) all.push(x);
   }
   for (const m of all) { m.map?.dispose(); m.dispose(); }
-}
-
-// ---------- 家具建模（本地：寬＝X、深＝Z、正面＝+Z） ----------
-function buildItem(it, M, cut, plan) {
-  const g = new THREE.Group();
-  const w = it.w, d = it.d, hw = w / 2, hd = d / 2;
-  const H = itemHeight(it);
-  const box = (bw, bh, bd, x, y, z, mat) => {
-    if (bw <= 0 || bh <= 0 || bd <= 0) return null;
-    const m = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), mat);
-    m.position.set(x, y + bh / 2, z);
-    g.add(m);
-    return m;
-  };
-  const cyl = (rx, h, rz, x, y, z, mat, seg = 24) => {
-    const m = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, h, seg), mat);
-    m.scale.set(rx, 1, rz);
-    m.position.set(x, y + h / 2, z);
-    g.add(m);
-    return m;
-  };
-  const legs = (lw, lh, inset, mat) => {
-    for (const sx of [-1, 1]) for (const sz of [-1, 1]) box(lw, lh, lw, sx * (hw - inset - lw / 2), 0, sz * (hd - inset - lw / 2), mat);
-  };
-  const clipH = (h) => Math.min(h, cut ?? Infinity);
-  switch (it.kind) {
-    case 'bed':
-    case 'bed_single': {
-      box(w, 28, d, 0, 0, 0, M.woodLight);
-      box(w - 4, 20, d - 6, 0, 28, 2, M.fabric);
-      box(w, 90, 6, 0, 0, -hd + 3, M.wood);
-      const n = it.kind === 'bed' ? 2 : 1;
-      const pw = (w - 18) / n - (n > 1 ? 3 : 0);
-      for (let i = 0; i < n; i++) box(pw, 10, 30, -hw + 9 + pw / 2 + i * (pw + 6), 48, -hd + 26, M.white);
-      box(w - 2, 4, d * 0.6, 0, 47, hd - d * 0.3, M.fabric2);
-      break;
-    }
-    case 'wardrobe': {
-      const h = clipH(H);
-      box(w, h, d, 0, 0, 0, M.cabinet);
-      const doors = Math.max(1, Math.round(w / 50));
-      for (let i = 1; i < doors; i++) box(0.8, h - 10, 0.6, -hw + (i * w) / doors, 5, hd + 0.3, M.woodDark);
-      for (let i = 0; i < doors; i++) box(2, Math.min(40, h * 0.3), 2, -hw + ((i + 0.5) * w) / doors + (i % 2 ? -8 : 8), h * 0.45, hd + 1, M.dark);
-      break;
-    }
-    case 'desk':
-    case 'table':
-      box(w, 4, d, 0, H - 4, 0, it.kind === 'table' ? M.wood : M.woodLight);
-      legs(5, H - 4, 3, M.woodDark);
-      break;
-    case 'nightstand':
-    case 'box':
-      box(w, H, d, 0, 0, 0, it.kind === 'box' ? M.stone : M.woodLight);
-      break;
-    case 'chair':
-      box(w - 8, 5, d - 8, 0, 43, 0, M.wood);
-      legs(3.5, 43, 5, M.woodDark);
-      box(w - 8, 40, 3, 0, 48, -hd + 5.5, M.wood);
-      break;
-    case 'sofa':
-      box(w, 42, d, 0, 0, 0, M.sofa);
-      box(w, 38, 18, 0, 42, -hd + 9, M.sofa);
-      box(16, 20, d, -hw + 8, 42, 0, M.sofa);
-      box(16, 20, d, hw - 8, 42, 0, M.sofa);
-      box(w - 34, 10, d - 22, 0, 42, 9, M.fabric);
-      break;
-    case 'tv':
-      box(w, 45, d, 0, 0, 0, M.woodDark);
-      box(Math.min(w * 0.85, 140), 70, 5, 0, 60, -hd + 8, M.black);
-      box(20, 15, 12, 0, 45, -hd + 8, M.dark);
-      break;
-    case 'toilet': {
-      box(w, 36, d * 0.26, 0, 38, -hd + d * 0.13, M.porcelain);
-      cyl(w * 0.42, 40, d * 0.34, 0, 0, -hd + d * 0.26 + d * 0.34, M.porcelain, 28);
-      cyl(w * 0.44, 3, d * 0.36, 0, 40, -hd + d * 0.26 + d * 0.34, M.white, 28);
-      break;
-    }
-    case 'basin':
-      box(w, 78, d, 0, 0, 0, M.woodLight);
-      box(w + 2, 5, d + 2, 0, 78, 0, M.stone);
-      cyl(w * 0.3, 2, d * 0.28, 0, 83, 2, M.water);
-      box(Math.min(w, 60), 75, 2, 0, 110, -hd + 1, M.glass);
-      break;
-    case 'shower':
-      box(w, 4, d, 0, 0, 0, M.stone);
-      if (clipH(195) > 20) {
-        const gl = box(w, clipH(195) - 4, 1, 0, 4, hd - 0.5, M.glass);
-        if (gl) gl.userData.noShadow = true;
-      }
-      cyl(8, 2, 8, 0, Math.min(190, clipH(190) - 3), -hd + 10, M.stainless);
-      break;
-    case 'bathtub':
-      box(w, 50, d, 0, 0, 0, M.porcelain);
-      box(w - 14, 2, d - 14, 0, 44, 0, M.water);
-      break;
-    case 'counter': {
-      box(w, 82, d - 2, 0, 0, -1, M.white);
-      box(w, 4, d, 0, 82, 0, M.stone);
-      box(w, 8, d - 6, 0, 0, -3, M.dark);
-      if (it.top === 'sink') box(Math.min(w - 16, 60), 1, d - 22, 0, 86.2, 2, M.stainless);
-      if (it.top === 'stove') {
-        box(Math.min(w - 10, 76), 1, d - 16, 0, 86, 0, M.black);
-        for (const k of [-1, 1]) cyl(9, 2, 9, k * Math.min(w, 76) * 0.24, 86.5, 0, M.dark, 18);
-      }
-      break;
-    }
-    case 'fridge': {
-      const h = clipH(H);
-      box(w, h, d, 0, 0, 0, M.white);
-      box(w - 2, 0.6, 0.6, 0, h * 0.62, hd + 0.3, M.dark);
-      box(2, Math.min(40, h * 0.25), 3, hw - 8, h * 0.68, hd + 1.5, M.stainless);
-      break;
-    }
-    case 'washer':
-      box(w, 88, d, 0, 0, 0, M.white);
-      cyl(Math.min(w, d) * 0.33, 1, Math.min(w, d) * 0.33, 0, 88, 3, M.dark);
-      box(w, 10, 8, 0, 88, -hd + 4, M.white);
-      break;
-    case 'laundry':
-      legs(4, 60, 2, M.stainless);
-      box(w, 25, d, 0, 60, 0, M.stainless);
-      box(w - 8, 1, d - 8, 0, 85.1, 0, M.water);
-      break;
-    case 'ac':
-      box(w, H, d, 0, 0, 0, M.white);
-      box(w - 10, 3, 2, 0, 4, hd, M.dark);
-      break;
-    case 'acout':
-      box(w, H, d, 0, 0, 0, M.white);
-      cyl(H * 0.34, 2, H * 0.34, w * 0.1, H / 2, hd, M.dark).rotation.x = Math.PI / 2;
-      break;
-    case 'ledge':
-      box(w, 10, d, 0, -10, 0, M.concrete);
-      box(w, 12, 4, 0, 0, hd - 2, M.concrete);
-      break;
-    case 'duct':
-    case 'column':
-      box(w, clipH(H), d, 0, 0, 0, M.concrete);
-      break;
-    case 'elevator': {
-      const h = clipH(Math.min(H, 240));
-      box(w, 4, d, 0, 0, 0, M.steel);
-      box(w, h, 3, 0, 0, -hd + 1.5, M.steel);
-      box(3, h, d, -hw + 1.5, 0, 0, M.steel);
-      box(3, h, d, hw - 1.5, 0, 0, M.steel);
-      box(w * 0.3, 3, 1, 0, 95, -hd + 3, M.dark);
-      break;
-    }
-    case 'armchair':
-      box(w, 40, d, 0, 0, 0, M.fabric3);
-      box(w, 42, 15, 0, 40, -hd + 7.5, M.fabric3);
-      box(12, 20, d, -hw + 6, 40, 0, M.fabric3);
-      box(12, 20, d, hw - 6, 40, 0, M.fabric3);
-      box(w - 26, 8, d - 20, 0, 40, 6, M.fabric);
-      break;
-    case 'coffee':
-      box(w, 4, d, 0, H - 4, 0, M.wood);
-      box(w - 10, 2, d - 10, 0, 12, 0, M.wood);
-      legs(4, H - 4, 3, M.metal);
-      break;
-    case 'rug': {
-      const m = box(w, 1.2, d, 0, 0, 0, M.rug);
-      if (m) m.userData.noShadow = true;
-      break;
-    }
-    case 'shelf': {
-      const h = clipH(H);
-      box(w, h, 3, 0, 0, -hd + 1.5, M.woodLight);
-      box(2.5, h, d, -hw + 1.25, 0, 0, M.woodLight);
-      box(2.5, h, d, hw - 1.25, 0, 0, M.woodLight);
-      for (let y = 0; y < h - 5; y += 38) {
-        box(w, 2.5, d, 0, y, 0, M.woodLight);
-        if (y > 0) for (let k = 0; k < Math.floor(w / 18); k++) if ((k * 7 + y) % 5 > 1) box(3 + (k % 3), 24 + (k % 4) * 3, d * 0.75, -hw + 8 + k * 16, y + 2.5, 0, [M.fabric2, M.fabric3, M.fabric][k % 3]);
-      }
-      break;
-    }
-    case 'cabinet': {
-      const h = clipH(H);
-      box(w, h, d, 0, 0, 0, M.cabinet);
-      const doors = Math.max(1, Math.round(w / 45));
-      for (let i = 1; i < doors; i++) box(0.8, h - 6, 0.6, -hw + (i * w) / doors, 3, hd + 0.3, M.woodDark);
-      if (h > 120) box(w, 1, 0.8, 0, Math.min(h - 2, 100), hd + 0.4, M.woodDark);
-      break;
-    }
-    case 'bench':
-      box(w, 5, d, 0, H - 5, 0, M.wood);
-      legs(4, H - 5, 4, M.metal);
-      break;
-    case 'lamp':
-      cyl(hw * 0.6, 3, hd * 0.6, 0, 0, 0, M.metal, 20);
-      cyl(1.2, H - 35, 1.2, 0, 3, 0, M.metal, 8);
-      { const sh = cyl(hw * 0.75, 32, hd * 0.75, 0, H - 34, 0, M.lampShade, 24); sh.userData.noShadow = true; }
-      break;
-    case 'island':
-      box(w, 86, d - 25, 0, 0, -12.5, M.cabinet);
-      box(w + 4, 4, d, 0, 86, 0, M.stone);
-      break;
-    case 'plant':
-      cyl(hw * 0.7, 35, hd * 0.7, 0, 0, 0, M.pot);
-      { const s = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), M.plant); s.scale.set(hw, (H - 35) / 2, hd); s.position.set(0, 35 + (H - 35) / 2, 0); g.add(s); }
-      break;
-    case 'stair': {
-      const sg = stairGeometry(it);
-      for (const s of sg.steps3d) {
-        const top = s.top;
-        const m = box(s.x1 - s.x0, top, s.y1 - s.y0, (s.x0 + s.x1) / 2, 0, (s.y0 + s.y1) / 2, M.stone);
-        if (m) m.material = M.stone;
-      }
-      break;
-    }
-    default:
-      box(w, H, d, 0, 0, 0, M.stone);
-  }
-  return g;
 }
 
 function makeLabel(title, sub) {

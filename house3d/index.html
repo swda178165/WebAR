@@ -23,6 +23,9 @@
     </div>
     <nav class="tabs" id="planTabs" aria-label="平面方案"></nav>
     <div class="actions">
+      <button class="btn accent" id="btnGen" title="輸入需求（幾房、要什麼），自動產生並比較多種格局">
+        <svg viewBox="0 0 20 20"><path d="M4 16 13 7m1.5-4 .6 1.6L16.7 5l-1.6.6L14.5 7l-.6-1.4L12.3 5l1.6-.4zM5 3l.5 1.2L6.7 5l-1.2.5L5 6.7l-.5-1.2L3.3 5l1.2-.5zm11 7 .4 1 1 .4-1 .4-.4 1-.4-1-1-.4 1-.4z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>自動規劃</span>
+      </button>
       <button class="btn" id="btnOpen" title="開啟 DXF / PDF / 圖片 / 專案檔">
         <svg viewBox="0 0 20 20"><path d="M3 5h5l2 2h7v8H3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg><span>開啟</span>
       </button>
@@ -67,6 +70,7 @@
         <button id="zoomFit" title="全圖">全圖</button>
         <button id="zoomIn" title="放大" aria-label="放大">+</button>
         <button id="toggleUnderlay" class="toggle" title="顯示媽媽的原圖當底圖">原圖</button>
+        <button id="toggleDaylight" class="toggle" title="依基地條件模擬採光（顏色越亮代表越亮）">採光</button>
       </div>
       <div class="catalog" id="catalog" hidden></div>
     </section>
@@ -84,6 +88,16 @@
         <label class="cut" title="把牆降低，看清室內"><span>牆高</span><input type="range" id="cutRange" min="40" max="300" step="10" value="160"><output id="cutOut">160 cm</output></label>
         <label class="cut style-pick" title="裝潢風格"><span>風格</span><select id="styleSel" aria-label="裝潢風格"></select></label>
         <button class="toggle on" id="toggleLabels3d">標籤</button>
+        <button class="toggle" id="toggleSun" title="依基地條件模擬某一天、某一時刻的日照與陰影">日照</button>
+      </div>
+      <div class="sun-bar" id="sunBar" hidden>
+        <div class="sun-row">
+          <select id="sunMonth" aria-label="月份"></select>
+          <input type="range" id="sunHour" min="6" max="18" step="0.25" value="10" aria-label="時間">
+          <output id="sunOut">10:00</output>
+          <button id="sunPlay" title="播放一整天" aria-label="播放一整天">▶</button>
+        </div>
+        <div class="sun-info" id="sunInfo"></div>
       </div>
       <div class="walkpad" id="walkpad" hidden>
         <button data-walk="f" aria-label="前進">▲</button>
@@ -94,7 +108,12 @@
     </section>
 
     <aside class="side" id="side" aria-label="屬性">
+      <div class="side-tabs" id="sideTabs" role="tablist">
+        <button data-tab="props" class="on" role="tab">屬性</button>
+        <button data-tab="site" role="tab">基地・採光</button>
+      </div>
       <div id="props"></div>
+      <div id="sitePanel" hidden></div>
     </aside>
   </div>
 
