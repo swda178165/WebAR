@@ -525,7 +525,7 @@ export function planF() {
   const mb = W(178, 899, 178, 1152, 12);
   void mb;
   const mt = W(0, 1152, 300, 1152, 12);
-  O(mt, 95, 85, 'sliding', { h: DEFAULTS.doorHeight });
+  O(mt, 95, 90, 'sliding', { h: DEFAULTS.doorHeight });
   O(mt, 239, 90, 'sliding', { h: DEFAULTS.doorHeight });
   W(300, 1152, 300, 1550, 12);
   R('主浴', 'bath', [0, 899, 178, 1152]);
