@@ -151,7 +151,7 @@ export class Editor2D {
       }
       if (st.itemLabels) {
         for (const it of plan.items) {
-          if (['chair', 'acout', 'duct', 'stair', 'elevator'].includes(it.kind)) continue;
+          if (['chair', 'acout', 'duct', 'stair', 'elevator', 'rug', 'lamp'].includes(it.kind)) continue;
           const small = Math.min(fs * 0.75, Math.min(it.w, it.d) * 0.45 + 4);
           if (small < this.px(7)) continue;
           out.push(`<text x="${f1(it.x)}" y="${f1(it.y + small * 0.35)}" font-size="${f1(small)}" class="item-name">${esc(itemName(it))}</text>`);
@@ -320,6 +320,31 @@ export class Editor2D {
         break;
       case 'plant':
         s += c(0, 0, Math.min(hw, hd), 'soft') + c(0, 0, Math.min(hw, hd) * 0.5, 'thin');
+        break;
+      case 'armchair':
+        s += r(-hw, -hd, w, d, 'body', 8);
+        s += r(-hw + 10, -hd + 16, w - 20, d - 20, 'soft', 5);
+        break;
+      case 'coffee':
+        s += r(-hw, -hd, w, d, 'body', Math.min(hw, hd) * 0.3);
+        break;
+      case 'rug':
+        s += r(-hw, -hd, w, d, 'rug dash', 4);
+        break;
+      case 'shelf':
+      case 'cabinet':
+        s += r(-hw, -hd, w, d, 'body');
+        for (let x = -hw + w / Math.max(1, Math.round(w / 45)); x < hw - 2; x += w / Math.max(1, Math.round(w / 45))) s += l(x, -hd, x, hd, 'thin faint');
+        break;
+      case 'lamp':
+        s += c(0, 0, Math.min(hw, hd) * 0.9, 'soft') + c(0, 0, 3, 'dark');
+        break;
+      case 'bench':
+        s += r(-hw, -hd, w, d, 'body', 3);
+        break;
+      case 'island':
+        s += r(-hw, -hd, w, d, 'body');
+        s += l(-hw, hd - 25, hw, hd - 25, 'thin faint');
         break;
       case 'stair':
         s += this.stairSvg(it);

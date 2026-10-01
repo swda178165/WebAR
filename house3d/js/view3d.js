@@ -6,6 +6,7 @@ import {
 } from './model.js';
 import { itemHeight, itemElev, itemName } from './catalog.js';
 import { stairGeometry } from './editor2d.js';
+import { STYLES } from './styles.js';
 
 const SLAB = 15;
 
@@ -55,7 +56,8 @@ export class View3D {
     this.root.scale.setScalar(0.01);
     this.scene.add(this.root);
 
-    this.mats = makeMaterials();
+    this.styleKey = 'basic';
+    this.mats = makeMaterials('basic');
     this.cutHeight = 160; // null＝完整牆高；預設剖切成「娃娃屋」看得到室內
     this.showLabels = true;
     this.mode = 'orbit';
@@ -72,7 +74,18 @@ export class View3D {
     this.renderer.setAnimationLoop(() => this.tick());
   }
 
+  setStyle(key) {
+    const k = STYLES[key] ? key : 'basic';
+    if (k === this.styleKey) return;
+    disposeMaterials(this.mats);
+    this.styleKey = k;
+    this.mats = makeMaterials(k);
+    if (this.dark !== undefined) this.mats.cap.color.set(this.dark ? 0x1d2024 : 0x3a3e44);
+    this.invalidate();
+  }
+
   setTheme(dark) {
+    this.dark = dark;
     this.ground.material.color.set(dark ? 0x2a2d31 : 0xd8d3c8);
     this.mats.cap.color.set(dark ? 0x1d2024 : 0x3a3e44);
     this.invalidate();
@@ -115,6 +128,7 @@ export class View3D {
   rebuild() {
     const plan = this.app.plan;
     if (!plan) return;
+    if ((plan.style || 'basic') !== this.styleKey) this.setStyle(plan.style || 'basic');
     this.clearRoot();
     const M = this.mats;
     const cut = this.cutHeight;
@@ -519,29 +533,75 @@ function tileTex(base, grout, size = 60) {
   }, 128, size);
 }
 
-function makeMaterials() {
+function concreteTex(base) {
+  return canvasTex((g, s) => {
+    g.fillStyle = base; g.fillRect(0, 0, s, s);
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    for (let i = 0; i < 2600; i++) {
+      const v = rnd() < 0.5 ? 0 : 255;
+      g.fillStyle = `rgba(${v},${v},${v},${0.02 + rnd() * 0.04})`;
+      const r = 1 + rnd() * 3;
+      g.fillRect(rnd() * s, rnd() * s, r, r);
+    }
+    g.globalAlpha = 0.05;
+    for (let i = 0; i < 6; i++) { g.fillStyle = rnd() < 0.5 ? '#000' : '#fff'; g.beginPath(); g.arc(rnd() * s, rnd() * s, 30 + rnd() * 60, 0, Math.PI * 2); g.fill(); }
+    g.globalAlpha = 1;
+  }, 256, 180);
+}
+
+function marbleTex(base, vein, size = 120) {
+  return canvasTex((g, s) => {
+    g.fillStyle = base; g.fillRect(0, 0, s, s);
+    let seed = 11;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    g.strokeStyle = vein; g.lineCap = 'round';
+    for (let i = 0; i < 7; i++) {
+      g.globalAlpha = 0.18 + rnd() * 0.25; g.lineWidth = 0.6 + rnd() * 1.6;
+      g.beginPath();
+      let x = rnd() * s, y = 0;
+      g.moveTo(x, y);
+      while (y < s) { x += (rnd() - 0.45) * 26; y += 10 + rnd() * 18; g.lineTo(x, y); }
+      g.stroke();
+    }
+    g.globalAlpha = 0.5; g.strokeStyle = 'rgba(0,0,0,0.12)'; g.lineWidth = 2; g.strokeRect(0, 0, s, s);
+    g.globalAlpha = 1;
+  }, 256, size);
+}
+
+function floorMat(std, f) {
+  if (!f) return std(0xe3ddd2);
+  if (f.tex === 'wood') return std(0xffffff, { map: woodTex(f.base, f.dark), roughness: 0.7 });
+  if (f.tex === 'tile') return std(0xffffff, { map: tileTex(f.base, f.dark, f.size || 60), roughness: 0.55 });
+  if (f.tex === 'concrete') return std(0xffffff, { map: concreteTex(f.base), roughness: 0.75 });
+  if (f.tex === 'marble') return std(0xffffff, { map: marbleTex(f.base, f.dark, f.size || 120), roughness: 0.25 });
+  return std(f.base);
+}
+
+function makeMaterials(styleKey = 'basic') {
+  const S = STYLES[styleKey] || STYLES.basic;
   const std = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...extra });
   return {
-    wall: std(0xf4f1ea, { roughness: 0.95 }),
+    wall: std(S.walls, { roughness: 0.95 }),
     wallSel: std(0xf2d95c, { roughness: 0.9 }),
-    parapet: std(0xe9e4d9, { roughness: 0.95 }),
+    parapet: std(S.parapet, { roughness: 0.95 }),
     cap: std(0x3a3e44, { roughness: 1 }),
     slabSide: std(0xbdb7ab, { roughness: 1 }),
     voidFloor: new THREE.MeshBasicMaterial({ color: 0x3b4247, side: THREE.DoubleSide }),
     floor: {
-      living: std(0xffffff, { map: woodTex('#caa27a', '#7b5a3a'), roughness: 0.7 }),
-      bedroom: std(0xffffff, { map: woodTex('#d8b994', '#8a6a47'), roughness: 0.72 }),
-      hall: std(0xffffff, { map: woodTex('#cfae88', '#80613f'), roughness: 0.72 }),
-      kitchen: std(0xffffff, { map: tileTex('#e3e3de', '#b9b8b1', 60), roughness: 0.55 }),
-      bath: std(0xffffff, { map: tileTex('#d7e1e6', '#a9b7bf', 30), roughness: 0.5 }),
-      balcony: std(0xffffff, { map: tileTex('#caa491', '#9b7968', 30), roughness: 0.8 }),
+      living: floorMat(std, S.floor.living),
+      bedroom: floorMat(std, S.floor.bedroom),
+      hall: floorMat(std, S.floor.hall),
+      kitchen: floorMat(std, S.floor.kitchen),
+      bath: floorMat(std, S.floor.bath),
+      balcony: floorMat(std, S.floor.balcony),
       stair: std(0xd2cfc8, { roughness: 0.8 }),
       elevator: std(0x9aa1a7, { roughness: 0.4, metalness: 0.5 }),
-      storage: std(0xd6d2c9),
-      other: std(0xe3ddd2),
+      storage: floorMat(std, S.floor.hall),
+      other: floorMat(std, S.floor.hall),
     },
-    door: std(0xb88a5b, { roughness: 0.6 }),
-    frame: std(0xe7e2d8),
+    door: std(S.door, { roughness: 0.6 }),
+    frame: std(S.frame),
     glass: new THREE.MeshPhysicalMaterial({ color: 0xcfe6ee, roughness: 0.05, transmission: 0, transparent: true, opacity: 0.28, depthWrite: false }),
     accentGlass: new THREE.MeshPhysicalMaterial({ color: 0xf2d95c, transparent: true, opacity: 0.5, depthWrite: false }),
     alu: std(0x8d949a, { metalness: 0.6, roughness: 0.35 }),
@@ -549,16 +609,20 @@ function makeMaterials() {
     steel: std(0xb7bcc1, { metalness: 0.75, roughness: 0.3 }),
     accent: std(0xf2c230, { roughness: 0.6 }),
     selLine: new THREE.LineBasicMaterial({ color: 0xf2a900, linewidth: 2 }),
-    wood: std(0xc49a6c, { roughness: 0.6 }),
-    woodLight: std(0xe1c9a5, { roughness: 0.65 }),
-    woodDark: std(0x7a5a3f, { roughness: 0.6 }),
+    wood: std(S.wood, { roughness: 0.6 }),
+    woodLight: std(S.woodLight, { roughness: 0.65 }),
+    woodDark: std(S.woodDark, { roughness: 0.6 }),
+    cabinet: std(S.cabinet, { roughness: 0.6 }),
     white: std(0xfafaf7, { roughness: 0.4 }),
     porcelain: std(0xffffff, { roughness: 0.2 }),
-    fabric: std(0xe8e4dc, { roughness: 1 }),
-    fabric2: std(0x8ea4a8, { roughness: 1 }),
-    fabric3: std(0xb9876a, { roughness: 1 }),
-    sofa: std(0x7d8f86, { roughness: 1 }),
-    stone: std(0xdad6ce, { roughness: 0.45 }),
+    fabric: std(S.fabric, { roughness: 1 }),
+    fabric2: std(S.fabric2, { roughness: 1 }),
+    fabric3: std(S.fabric3, { roughness: 1 }),
+    sofa: std(S.sofa, { roughness: 1 }),
+    rug: std(S.rug, { roughness: 1 }),
+    stone: std(S.stone, { roughness: 0.45 }),
+    metal: std(S.metal, { roughness: 0.35, metalness: 0.6 }),
+    lampShade: new THREE.MeshStandardMaterial({ color: S.lampShade, roughness: 0.9, emissive: new THREE.Color(S.lampShade), emissiveIntensity: 0.35 }),
     dark: std(0x2b2e33, { roughness: 0.5 }),
     black: std(0x151618, { roughness: 0.3 }),
     concrete: std(0xb9b5ad, { roughness: 1 }),
@@ -567,6 +631,15 @@ function makeMaterials() {
     pot: std(0xb56d4b, { roughness: 0.9 }),
     water: std(0xbfdbe6, { roughness: 0.1 }),
   };
+}
+
+function disposeMaterials(M) {
+  const all = [];
+  for (const v of Object.values(M)) {
+    if (v && v.isMaterial) all.push(v);
+    else if (v && typeof v === 'object') for (const x of Object.values(v)) if (x?.isMaterial) all.push(x);
+  }
+  for (const m of all) { m.map?.dispose(); m.dispose(); }
 }
 
 // ---------- 家具建模（本地：寬＝X、深＝Z、正面＝+Z） ----------
@@ -606,7 +679,7 @@ function buildItem(it, M, cut, plan) {
     }
     case 'wardrobe': {
       const h = clipH(H);
-      box(w, h, d, 0, 0, 0, M.woodLight);
+      box(w, h, d, 0, 0, 0, M.cabinet);
       const doors = Math.max(1, Math.round(w / 50));
       for (let i = 1; i < doors; i++) box(0.8, h - 10, 0.6, -hw + (i * w) / doors, 5, hd + 0.3, M.woodDark);
       for (let i = 0; i < doors; i++) box(2, Math.min(40, h * 0.3), 2, -hw + ((i + 0.5) * w) / doors + (i % 2 ? -8 : 8), h * 0.45, hd + 1, M.dark);
@@ -715,6 +788,55 @@ function buildItem(it, M, cut, plan) {
       box(w * 0.3, 3, 1, 0, 95, -hd + 3, M.dark);
       break;
     }
+    case 'armchair':
+      box(w, 40, d, 0, 0, 0, M.fabric3);
+      box(w, 42, 15, 0, 40, -hd + 7.5, M.fabric3);
+      box(12, 20, d, -hw + 6, 40, 0, M.fabric3);
+      box(12, 20, d, hw - 6, 40, 0, M.fabric3);
+      box(w - 26, 8, d - 20, 0, 40, 6, M.fabric);
+      break;
+    case 'coffee':
+      box(w, 4, d, 0, H - 4, 0, M.wood);
+      box(w - 10, 2, d - 10, 0, 12, 0, M.wood);
+      legs(4, H - 4, 3, M.metal);
+      break;
+    case 'rug': {
+      const m = box(w, 1.2, d, 0, 0, 0, M.rug);
+      if (m) m.userData.noShadow = true;
+      break;
+    }
+    case 'shelf': {
+      const h = clipH(H);
+      box(w, h, 3, 0, 0, -hd + 1.5, M.woodLight);
+      box(2.5, h, d, -hw + 1.25, 0, 0, M.woodLight);
+      box(2.5, h, d, hw - 1.25, 0, 0, M.woodLight);
+      for (let y = 0; y < h - 5; y += 38) {
+        box(w, 2.5, d, 0, y, 0, M.woodLight);
+        if (y > 0) for (let k = 0; k < Math.floor(w / 18); k++) if ((k * 7 + y) % 5 > 1) box(3 + (k % 3), 24 + (k % 4) * 3, d * 0.75, -hw + 8 + k * 16, y + 2.5, 0, [M.fabric2, M.fabric3, M.fabric][k % 3]);
+      }
+      break;
+    }
+    case 'cabinet': {
+      const h = clipH(H);
+      box(w, h, d, 0, 0, 0, M.cabinet);
+      const doors = Math.max(1, Math.round(w / 45));
+      for (let i = 1; i < doors; i++) box(0.8, h - 6, 0.6, -hw + (i * w) / doors, 3, hd + 0.3, M.woodDark);
+      if (h > 120) box(w, 1, 0.8, 0, Math.min(h - 2, 100), hd + 0.4, M.woodDark);
+      break;
+    }
+    case 'bench':
+      box(w, 5, d, 0, H - 5, 0, M.wood);
+      legs(4, H - 5, 4, M.metal);
+      break;
+    case 'lamp':
+      cyl(hw * 0.6, 3, hd * 0.6, 0, 0, 0, M.metal, 20);
+      cyl(1.2, H - 35, 1.2, 0, 3, 0, M.metal, 8);
+      { const sh = cyl(hw * 0.75, 32, hd * 0.75, 0, H - 34, 0, M.lampShade, 24); sh.userData.noShadow = true; }
+      break;
+    case 'island':
+      box(w, 86, d - 25, 0, 0, -12.5, M.cabinet);
+      box(w + 4, 4, d, 0, 86, 0, M.stone);
+      break;
     case 'plant':
       cyl(hw * 0.7, 35, hd * 0.7, 0, 0, 0, M.pot);
       { const s = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), M.plant); s.scale.set(hw, (H - 35) / 2, hd); s.position.set(0, 35 + (H - 35) / 2, 0); g.add(s); }

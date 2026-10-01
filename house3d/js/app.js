@@ -4,7 +4,8 @@ import {
   normalizePlan, newPlan, ROOM_KINDS, OPENING_TYPES, DEFAULTS, round1,
 } from './model.js';
 import { CATALOG, COUNTER_TOPS, itemName } from './catalog.js';
-import { builtinPlans } from './plans.js';
+import { builtinPlans, BUILTIN_VERSION } from './plans.js';
+import { STYLES } from './styles.js';
 import { Editor2D } from './editor2d.js';
 import { View3D } from './view3d.js';
 import { exportDXF, dxfToPlan, decodeDXF, planFromGeometry } from './dxf.js';
@@ -55,7 +56,14 @@ class App {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { saved = null; }
     if (saved?.plans?.length) {
-      this.project = { plans: saved.plans.map(normalizePlan), active: saved.active };
+      this.project = { plans: saved.plans.map(normalizePlan), active: saved.active, builtinVersion: saved.builtinVersion || 1 };
+      // 舊存檔沒有後來新增的提案：補上，不動使用者原本的平面
+      if (this.project.builtinVersion < BUILTIN_VERSION) {
+        const have = new Set(this.project.plans.map((p) => p.key).filter(Boolean));
+        const names = new Set(this.project.plans.map((p) => p.name));
+        for (const bp of builtinPlans()) if (!have.has(bp.key) && !names.has(bp.name) && !['a', 'b', 'c'].includes(bp.key)) this.project.plans.push(bp);
+        this.project.builtinVersion = BUILTIN_VERSION;
+      }
       // 內建底圖若遺失 src，從內建資料補回
       const builtin = builtinPlans();
       for (const p of this.project.plans) {
@@ -66,7 +74,7 @@ class App {
       }
     } else {
       const plans = builtinPlans();
-      this.project = { plans, active: plans[0].id };
+      this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION };
     }
   }
 
@@ -126,6 +134,8 @@ class App {
 
   changed(transient, opts = {}) {
     this.editor.render();
+    const ss = document.getElementById('styleSel');
+    if (ss && ss.value !== (this.plan.style || 'basic')) ss.value = this.plan.style || 'basic';
     if (!opts.skip3d) this.view.invalidate();
     if (!transient) this.renderProps();
     else this.updatePropsLive();
@@ -243,6 +253,9 @@ class App {
       $('#cutOut').textContent = v >= 300 ? '完整' : v + ' cm';
       this.view.invalidate();
     });
+    const styleSel = $('#styleSel');
+    styleSel.innerHTML = Object.entries(STYLES).map(([k, v]) => `<option value="${k}">${esc(v.name)}</option>`).join('');
+    styleSel.addEventListener('change', () => { this.plan.style = styleSel.value; this.commit(); this.toast(`風格：${STYLES[styleSel.value].name}`); });
     $('#toggleLabels3d').onclick = (e) => { this.view.showLabels = !this.view.showLabels; e.currentTarget.classList.toggle('on', this.view.showLabels); this.view.invalidate(); };
     document.querySelectorAll('#walkpad button').forEach((b) => {
       const k = b.dataset.walk;
@@ -394,7 +407,7 @@ class App {
         const ok = await this.choose('還原原始方案？', '目前所有修改與匯入的平面都會被取代。', [{ label: '確定還原', value: true }]);
         if (!ok) return;
         const plans = builtinPlans();
-        this.project = { plans, active: plans[0].id };
+        this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION };
         this.history.clear();
         this.sel = null;
         this.snapshotBase();
@@ -514,6 +527,7 @@ class App {
       const indoor = p.rooms.filter((r) => !['balcony', 'void'].includes(r.kind)).reduce((sum, r) => sum + areaM2(r.pts), 0);
       const balcony = p.rooms.filter((r) => r.kind === 'balcony').reduce((sum, r) => sum + areaM2(r.pts), 0);
       h += `<div class="sec"><h3>平面</h3><h2>${esc(p.name)}</h2>${p.note ? `<p class="note">${esc(p.note)}</p>` : ''}
+        ${p.brief?.length ? `<details class="brief" open><summary>設計重點</summary><ul>${p.brief.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></details>` : ''}
         <div class="stat"><div><b>${indoor.toFixed(1)}</b><small>室內面積 ㎡（牆中心線）（${m2ToPing(indoor).toFixed(1)} 坪）</small></div><div><b>${balcony.toFixed(1)}</b><small>陽台 ㎡</small></div>
         <div><b>${p.walls.length}</b><small>面牆</small></div><div><b>${p.items.length}</b><small>件家具設備</small></div></div>
         <div class="fields">${this.txt('名稱', 'pname', p.name)}${this.num('樓板高程', 'elevation', p.elevation || 0, { step: 5 })}${this.num('樓高', 'floorHeight', p.floorHeight, { step: 5 })}

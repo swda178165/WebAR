@@ -17,7 +17,8 @@ for (const plan of builtinPlans()) {
     const d = parseDXF(plain);
     assert.ok(d.entities.length > 200, 'entities ' + d.entities.length);
     assert.ok(plain.trimEnd().endsWith('EOF'));
-    assert.ok(d.entities.some((e) => e.type === 'TEXT' && e.text === '浴室'), '中文文字應可解碼');
+    const bathName = plan.rooms.find((r) => r.kind === 'bath').name;
+    assert.ok(d.entities.some((e) => e.type === 'TEXT' && e.text === bathName), '中文文字應可解碼');
   });
 
   check(`${plan.name}: 內嵌資料完整還原`, () => {
@@ -37,7 +38,8 @@ for (const plan of builtinPlans()) {
     const byType = (ops) => ops.map((o) => o.type).filter((t) => t !== 'elevator' && t !== 'sliding').sort().join(',');
     assert.equal(byType(p.openings), byType(plan.openings.filter((o) => o.type !== 'elevator')), 'door/window types');
     const names = new Set(p.rooms.map((r) => r.name));
-    for (const n of ['浴室', '天井', '電梯', '前陽台', '後陽台']) assert.ok(names.has(n), 'room ' + n);
+    // 有牆圍起來的空間（浴室、天井、電梯、陽台）都應該被辨識出來
+    for (const r of plan.rooms.filter((x) => ['bath', 'void', 'elevator', 'balcony'].includes(x.kind))) assert.ok(names.has(r.name), 'room ' + r.name);
     assert.ok(p.rooms.length >= 9, 'rooms ' + p.rooms.length);
     assert.ok(p.items.some((i) => i.kind === 'stair'), 'stair');
     assert.ok(p.items.filter((i) => i.kind === 'bed').length >= 1, 'bed');

@@ -53,8 +53,8 @@ function builder(meta) {
   return { plan, W, O, I, R };
 }
 
-// 三個方案共用的外殼：外牆、前後陽台、AC 版、樓梯、電梯、天井、左後浴室與左前臥室
-function shell(b, opt) {
+// 固定不動的結構：外牆、前後陽台、AC 版、樓梯、電梯、天井
+function core(b, opt) {
   const { W, O, I, R } = b;
   const ext = { kind: 'ext' };
   const par = { kind: 'parapet', h: DEFAULTS.parapet };
@@ -104,11 +104,21 @@ function shell(b, opt) {
   R('電梯', 'elevator', [382, 483, 600, 677]);
 
   // 天井（162×200，開向天空）
-  W(0, 684, 178, 684, 12);
+  const lwTop = W(0, 684, 178, 684, 12);
   const lw = W(178, 684, 178, 899, 12);
-  O(lw, 791, 160, 'window', { sill: 100, h: 120 });
-  W(0, 899, 178, 899, 12);
+  const lwBot = W(0, 899, 178, 899, 12);
+  const win = opt.lightwell || {};
+  O(lw, 791, win.right?.w ?? 160, 'window', { sill: win.right?.sill ?? 100, h: win.right?.h ?? 120 });
+  if (win.top) O(lwTop, win.top.c, win.top.w, 'window', { sill: win.top.sill, h: win.top.h });
+  if (win.bottom) O(lwBot, win.bottom.c, win.bottom.w, 'window', { sill: win.bottom.sill, h: win.bottom.h });
   R('天井', 'void', [0, 684, 178, 899]);
+  return { back, front };
+}
+
+// 原圖三個方案共用：核心結構 + 左後浴室與左前臥室
+function shell(b, opt) {
+  const { W, O, I, R } = b;
+  const { back, front } = core(b, opt);
 
   // 左後浴室（165×253）
   const bath2 = W(178, 899, 178, 1152, 12);
@@ -165,7 +175,7 @@ function laundry(b) {
 }
 
 export function planA() {
-  const meta = { name: '方案 A', note: '客餐廳在後側，右側開放式廚房，前方兩間臥室（藍筆圈起的右側浴室照原圖保留）。室內 87.84㎡（26.57坪）', elevation: 465, floorHeight: 350, wallHeight: 300 };
+  const meta = { key: 'a', name: '方案 A', note: '客餐廳在後側，右側開放式廚房，前方兩間臥室（藍筆圈起的右側浴室照原圖保留）。室內 87.84㎡（26.57坪）', elevation: 465, floorHeight: 350, wallHeight: 300 };
   const b = builder(meta);
   const { W, O, I, R } = b;
   shell(b, { ...meta, passageY: 955 });
@@ -202,7 +212,7 @@ export function planA() {
 }
 
 export function planB() {
-  const meta = { name: '方案 B', note: '廚房與餐桌移到後側，中段為客廳，右側改為儲藏室；前方兩間臥室。室內 87.84㎡（26.57坪）', elevation: 465, floorHeight: 350, wallHeight: 300 };
+  const meta = { key: 'b', name: '方案 B', note: '廚房與餐桌移到後側，中段為客廳，右側改為儲藏室；前方兩間臥室。室內 87.84㎡（26.57坪）', elevation: 465, floorHeight: 350, wallHeight: 300 };
   const b = builder(meta);
   const { W, O, I, R } = b;
   shell(b, { ...meta, passageY: 955 });
@@ -242,7 +252,7 @@ export function planB() {
 }
 
 export function planC() {
-  const meta = { name: '方案 C · 4F', note: '4F 平面：後側臥室、中段客廳＋餐廳，右前方為廚房（片牆開口為推測，可自行調整）。室內 87.84㎡（26.57坪）', elevation: 1165, floorHeight: 350, wallHeight: 300 };
+  const meta = { key: 'c', name: '方案 C · 4F', note: '4F 平面：後側臥室、中段客廳＋餐廳，右前方為廚房（片牆開口為推測，可自行調整）。室內 87.84㎡（26.57坪）', elevation: 1165, floorHeight: 350, wallHeight: 300 };
   const b = builder(meta);
   const { W, O, I, R } = b;
   shell(b, { ...meta, passageY: 1000, backDoor: 258 });
@@ -281,6 +291,272 @@ export function planC() {
   return finish(b.plan, 'c');
 }
 
+
+// ======================================================================
+// 優化提案：在不動外牆、樓梯、電梯、天井與三個管道間的前提下重新配置
+// ======================================================================
+const DUCTS = (I) => {
+  I('duct', 10, 588, 58, 655, 'S', { h: 300 });
+  I('duct', 9, 906, 58, 955, 'S', { h: 300 });
+  I('duct', 543, 897, 591, 955, 'S', { h: 300 });
+};
+
+// 後段主臥套房：臥室＋衣櫃＋可從臥室直接進出的主浴（L1 管道旁、面天井開高窗）
+function masterSuiteBack(b, { doorType = 'door' } = {}) {
+  const { W, O, I, R } = b;
+  const mw = W(178, 352, 361, 352, 12);
+  O(mw, 305, 90, doorType, doorType === 'door' ? { hinge: 'b', side: -1 } : { h: DEFAULTS.doorHeight });
+  W(178, 352, 178, 684, 12);
+  const bt = W(0, 417.5, 178, 417.5, 12);
+  O(bt, 136, 70, 'sliding', { h: DEFAULTS.doorHeight });
+  R('主臥', 'bedroom', [0, 0, 361, 0, 361, 352, 178, 352, 178, 417.5, 0, 417.5]);
+  R('主浴', 'bath', [0, 417.5, 178, 684]);
+  I('ac', 200, 9, 290, 29, 'S');
+  I('bed', 9, 70, 197, 252, 'E', { w: 182, label: '雙人床 6×6.2尺' });
+  I('nightstand', 9, 22, 49, 67, 'E');
+  I('nightstand', 9, 255, 49, 300, 'E');
+  I('rug', 110, 45, 270, 277, 'E');
+  I('wardrobe', 295, 15, 355, 215, 'W', { label: '衣櫃' });
+  I('wardrobe', 9, 351, 96, 411, 'N', { label: '衣櫃' });
+  I('basin', 9, 425, 57, 505, 'E', { label: '洗手台' });
+  I('toilet', 9, 515, 79, 560, 'E');
+  I('shower', 64, 566, 172, 678, 'N', { label: '淋浴（乾濕分離）' });
+}
+
+function laundryBack(I) {
+  I('washer', 6, -124, 66, -64, 'S');
+  I('laundry', 135, -124, 185, -79, 'S', { label: '洗衣台' });
+}
+
+function kitchenL(I) {
+  I('fridge', 384, 686.5, 454, 756.5, 'S', { label: '冰箱' });
+  I('counter', 454, 686.5, 531, 746.5, 'S', { top: 'sink', label: '水槽' });
+  I('counter', 531, 686.5, 591, 746.5, 'S', { label: '備料' });
+  I('counter', 531, 746.5, 591, 826, 'W', { label: '備料' });
+  I('counter', 531, 826, 591, 897, 'W', { top: 'stove', label: '瓦斯爐' });
+}
+
+function entry(I, { bench = true } = {}) {
+  I('cabinet', 184, 430, 224, 610, 'E', { label: '玄關鞋櫃', h: 210 });
+  if (bench) I('bench', 184, 615, 222, 678, 'E', { label: '穿鞋椅' });
+}
+
+export function planD() {
+  const meta = {
+    key: 'd', name: '提案 D · 三房', style: 'nordic', elevation: 465, floorHeight: 350, wallHeight: 300,
+    note: '三房兩廳兩衛：後段主臥套房、中段客餐廚、前段兩間小孩房。適合有小孩的家庭。',
+    brief: [
+      '主臥放在後段：離馬路最遠最安靜，有後陽台；主浴緊鄰左側管道間，從臥室直接進出，面天井開高窗通風。',
+      '中段做成「客餐廚一體」：餐桌貼著天井大窗借光，廚房 L 型沿電梯牆與右牆，瓦斯爐靠右側管道間排油煙。',
+      '前段兩間各約 2.9 坪的小孩房，各有一個陽台、衣櫃、書桌與單人床；房門開在同一面牆，不會門對門。',
+      '入口設玄關鞋櫃與穿鞋椅；從電梯出來看不到爐灶（避開「開門見灶」）。',
+      '共用浴室保留浴缸、緊鄰左下管道間；浴室門不對餐桌、不對床。',
+    ],
+  };
+  const b = builder(meta);
+  const { W, O, I, R } = b;
+  core(b, { ...meta, lightwell: { right: { w: 190, sill: 50, h: 180 }, top: { c: 118, w: 80, sill: 150, h: 60 }, bottom: { c: 118, w: 80, sill: 150, h: 60 } } });
+  DUCTS(I);
+  masterSuiteBack(b);
+  laundryBack(I);
+
+  R('玄關', 'hall', [178, 352, 361, 352, 361, 483, 382, 483, 382, 684, 178, 684]);
+  entry(I);
+
+  R('餐廳', 'living', [178, 684, 382, 684, 382, 957, 178, 957]);
+  I('table', 210, 765, 370, 855, 'S', { w: 160, label: '餐桌' });
+  for (const x of [225, 300]) { I('chair', x, 710, x + 55, 760, 'S'); I('chair', x, 860, x + 55, 910, 'N'); }
+
+  R('廚房', 'kitchen', [382, 677, 600, 677, 600, 957, 382, 957]);
+  kitchenL(I);
+
+  // 共用浴室（浴缸）
+  const b2 = W(178, 899, 178, 1231, 12);
+  O(b2, 945, 80, 'sliding', { h: DEFAULTS.doorHeight });
+  R('浴室', 'bath', [0, 899, 178, 1231]);
+  I('toilet', 9, 965, 79, 1010, 'E');
+  I('basin', 9, 1022, 57, 1092, 'E', { label: '洗手台' });
+  I('bathtub', 9, 1148, 172, 1223, 'N');
+
+  R('客廳', 'living', [178, 957, 600, 957, 600, 1231, 178, 1231]);
+  I('tv', 184, 1000, 224, 1180, 'E', { label: '電視櫃' });
+  I('rug', 330, 1000, 495, 1200, 'W');
+  I('sofa', 501, 995, 591, 1205, 'W', { label: '三人沙發' });
+  I('coffee', 396, 1045, 456, 1155, 'W');
+  I('plant', 184, 1185, 222, 1223);
+
+  // 前段兩間小孩房
+  const fw = W(0, 1231, 600, 1231, 12);
+  O(fw, 250, 85, 'door', { hinge: 'b', side: 1 });
+  O(fw, 350, 85, 'door', { hinge: 'a', side: 1 });
+  W(300, 1231, 300, 1550, 12);
+  R('小孩房', 'bedroom', [0, 1231, 300, 1550]);
+  R('小孩房', 'bedroom', [300, 1231, 600, 1550]);
+  I('wardrobe', 9, 1237, 195, 1297, 'S', { label: '衣櫃' });
+  I('bed_single', 9, 1325, 115, 1513, 'S');
+  I('desk', 239, 1310, 294, 1410, 'W', { label: '書桌' });
+  I('chair', 184, 1335, 234, 1390, 'E');
+  I('ac', 160, 1519, 250, 1541, 'N');
+  I('wardrobe', 405, 1237, 591, 1297, 'S', { label: '衣櫃' });
+  I('bed_single', 485, 1325, 591, 1513, 'S');
+  I('desk', 306, 1310, 361, 1410, 'E', { label: '書桌' });
+  I('chair', 366, 1335, 416, 1390, 'W');
+  I('ac', 350, 1519, 440, 1541, 'N');
+  I('plant', 130, 1662, 175, 1707);
+  I('plant', 420, 1662, 465, 1707);
+  return finish(b.plan, null);
+}
+
+export function planE() {
+  const meta = {
+    key: 'e', name: '提案 E · 大客廳', style: 'wabi', elevation: 465, floorHeight: 350, wallHeight: 300,
+    note: '兩房兩廳兩衛：前段整面做明亮大客廳（約 7 坪、兩個陽台），後段主臥套房，中段餐廚、書房兼客房與客用浴室。適合夫妻或常招待親友。',
+    brief: [
+      '前段採光最好、面寬 6 米，整面留給客廳：沙發、電視、閱讀角與書牆，兩扇落地門通往陽台。',
+      '書房／客房面天井開窗，另開一扇室內窗朝客廳借光；放沙發床，親友來可以過夜。',
+      '客用浴室放在右側管道間旁，客人不用經過私人區域。',
+      '後段主臥套房同提案 D，安靜、有獨立衛浴與兩組衣櫃。',
+      '從入口到客廳是一條連續的動線：玄關 → 餐廚 → 客廳，視線被餐廚與客浴擋住，不會一眼看穿前後陽台（避開穿堂）。',
+    ],
+  };
+  const b = builder(meta);
+  const { W, O, I, R } = b;
+  core(b, { ...meta, lightwell: { right: { w: 190, sill: 50, h: 180 }, top: { c: 118, w: 80, sill: 150, h: 60 }, bottom: { c: 95, w: 140, sill: 85, h: 125 } } });
+  DUCTS(I);
+  masterSuiteBack(b);
+  laundryBack(I);
+
+  R('玄關', 'hall', [178, 352, 361, 352, 361, 483, 382, 483, 382, 684, 178, 684]);
+  entry(I);
+
+  R('餐廳', 'living', [178, 684, 382, 684, 382, 957, 178, 957]);
+  I('table', 205, 765, 365, 855, 'S', { w: 160, label: '餐桌' });
+  I('bench', 215, 720, 355, 758, 'S', { label: '長凳' });
+  for (const x of [225, 300]) I('chair', x, 860, x + 55, 910, 'N');
+  R('廚房', 'kitchen', [382, 677, 600, 677, 600, 957, 382, 957]);
+  kitchenL(I);
+
+  // 書房兼客房（面天井開窗＋室內窗朝客廳）
+  const sw = W(178, 899, 178, 1152, 12);
+  O(sw, 1105, 80, 'sliding', { h: DEFAULTS.doorHeight });
+  const sb = W(0, 1152, 178, 1152, 12);
+  O(sb, 95, 130, 'window', { sill: 90, h: 120 });
+  R('書房', 'bedroom', [0, 899, 178, 1152]);
+  I('desk', 99, 905, 172, 960, 'N', { label: '書桌' });
+  I('chair', 110, 965, 160, 1012, 'N');
+  I('bed_single', 9, 958, 99, 1146, 'E', { w: 188, label: '沙發床' });
+
+  // 客用浴室（右側管道間旁）
+  W(416, 957, 600, 957, 12);
+  const gw = W(416, 957, 416, 1152, 12);
+  O(gw, 1010, 75, 'sliding', { h: DEFAULTS.doorHeight });
+  W(416, 1152, 600, 1152, 12);
+  R('客浴', 'bath', [416, 957, 600, 1152]);
+  I('toilet', 521, 963, 591, 1005, 'W');
+  I('basin', 543, 1020, 591, 1080, 'W', { label: '洗手台' });
+  I('shower', 422, 1060, 530, 1146, 'N');
+
+  R('走道', 'hall', [178, 957, 416, 957, 416, 1152, 178, 1152]);
+  I('shelf', 184, 960, 219, 1050, 'E', { w: 90, label: '展示櫃', h: 200 });
+
+  // 前段大客廳
+  R('客廳', 'living', [0, 1152, 600, 1550]);
+  I('ac', 9, 1170, 31, 1260, 'E');
+  I('tv', 9, 1250, 49, 1450, 'E', { label: '電視櫃' });
+  I('rug', 120, 1230, 320, 1470, 'W');
+  I('coffee', 190, 1295, 250, 1405, 'W');
+  I('sofa', 330, 1240, 420, 1460, 'W', { w: 220, label: '三人沙發' });
+  I('armchair', 495, 1185, 570, 1260, 'W');
+  I('lamp', 545, 1268, 585, 1308);
+  I('shelf', 556, 1330, 591, 1470, 'W', { w: 140, label: '書牆', h: 200 });
+  I('plant', 15, 1480, 60, 1525);
+  I('plant', 130, 1662, 175, 1707);
+  I('plant', 420, 1662, 465, 1707);
+  return finish(b.plan, null);
+}
+
+export function planF() {
+  const meta = {
+    key: 'f', name: '提案 F · 樂齡', style: 'japandi', elevation: 465, floorHeight: 350, wallHeight: 300,
+    note: '兩房兩廳兩衛、通用設計：長輩主臥在前段（日照最好）且套房浴室就在床邊；後段為子女回家用的客房。全部用 90 cm 拉門、無門檻。',
+    brief: [
+      '長輩主臥放在前段：日照充足、有陽台；套房浴室就在床頭邊，夜間如廁只要走幾步。',
+      '浴室門寬 90 cm、採拉門外推不佔空間，淋浴無門檻；馬桶側與淋浴區預留扶手（高 75–85 cm）。',
+      '走道淨寬 120 cm 以上、全室同一高程；入口有穿鞋椅，電梯直達。',
+      '客廳在前段右側，坐在沙發就看得到餐廚，照顧者與長輩彼此看得見。',
+      '後段客房給子女或看護使用，旁邊有第二間浴室（可做洗衣與晾衣）。',
+    ],
+  };
+  const b = builder(meta);
+  const { W, O, I, R } = b;
+  core(b, { ...meta, lightwell: { right: { w: 190, sill: 50, h: 180 }, top: { c: 118, w: 80, sill: 150, h: 60 }, bottom: { c: 118, w: 80, sill: 150, h: 60 } } });
+  DUCTS(I);
+  laundryBack(I);
+
+  // 後段客房
+  const gw = W(0, 352, 361, 352, 12);
+  O(gw, 300, 90, 'sliding', { h: DEFAULTS.doorHeight });
+  R('客房', 'bedroom', [0, 0, 361, 352]);
+  I('ac', 200, 9, 290, 29, 'S');
+  I('bed', 9, 80, 197, 232, 'E');
+  I('nightstand', 9, 30, 49, 75, 'E');
+  I('wardrobe', 295, 15, 355, 215, 'W', { label: '衣櫃' });
+  I('desk', 120, 290, 220, 346, 'N', { label: '書桌' });
+
+  // 第二間浴室（L1 管道旁）
+  const bw = W(178, 352, 178, 684, 12);
+  O(bw, 625, 90, 'sliding', { h: DEFAULTS.doorHeight });
+  R('浴室', 'bath', [0, 352, 178, 684]);
+  I('shower', 64, 358, 172, 470, 'S', { label: '淋浴（無門檻）' });
+  I('basin', 9, 360, 57, 440, 'E', { label: '洗手台' });
+  I('toilet', 9, 520, 79, 565, 'E');
+
+  R('玄關', 'hall', [178, 352, 361, 352, 361, 483, 382, 483, 382, 684, 178, 684]);
+  I('cabinet', 184, 360, 224, 480, 'E', { label: '玄關鞋櫃', h: 210 });
+  I('bench', 184, 485, 222, 570, 'E', { label: '穿鞋椅' });
+
+  R('餐廳', 'living', [178, 684, 382, 684, 382, 957, 178, 957]);
+  I('table', 205, 765, 365, 855, 'S', { w: 160, label: '餐桌' });
+  for (const x of [225, 300]) { I('chair', x, 710, x + 55, 760, 'S'); I('chair', x, 860, x + 55, 910, 'N'); }
+  R('廚房', 'kitchen', [382, 677, 600, 677, 600, 957, 382, 957]);
+  kitchenL(I);
+
+  // 長輩主臥套房（前段左）
+  const mb = W(178, 899, 178, 1152, 12);
+  void mb;
+  const mt = W(0, 1152, 300, 1152, 12);
+  O(mt, 95, 85, 'sliding', { h: DEFAULTS.doorHeight });
+  O(mt, 239, 90, 'sliding', { h: DEFAULTS.doorHeight });
+  W(300, 1152, 300, 1550, 12);
+  R('主浴', 'bath', [0, 899, 178, 1152]);
+  I('toilet', 9, 965, 79, 1010, 'E');
+  I('basin', 9, 1030, 57, 1100, 'E', { label: '洗手台（下方淨空）' });
+  I('shower', 82, 905, 172, 1000, 'S', { label: '淋浴（無門檻＋扶手）' });
+  R('主臥', 'bedroom', [0, 1152, 300, 1550]);
+  I('bed', 9, 1250, 197, 1402, 'E');
+  I('nightstand', 9, 1205, 49, 1248, 'E');
+  I('nightstand', 9, 1405, 49, 1450, 'E');
+  I('wardrobe', 140, 1164, 294, 1224, 'S', { label: '衣櫃' });
+  I('armchair', 215, 1430, 290, 1505, 'N');
+  I('ac', 160, 1519, 250, 1541, 'N');
+
+  R('走道', 'hall', [178, 957, 300, 957, 300, 1152, 178, 1152]);
+
+  // 客廳（前段右，向中段開放）
+  R('客廳', 'living', [300, 957, 600, 957, 600, 1550, 300, 1550]);
+  I('tv', 306, 1270, 346, 1430, 'E', { label: '電視櫃' });
+  I('rug', 360, 1250, 490, 1450, 'W');
+  I('coffee', 400, 1310, 455, 1390, 'W');
+  I('sofa', 501, 1270, 591, 1430, 'W', { w: 160, label: '雙人沙發' });
+  I('armchair', 400, 1180, 475, 1255, 'S');
+  I('lamp', 548, 1440, 588, 1480);
+  I('plant', 550, 1000, 590, 1040);
+  I('ac', 350, 1519, 440, 1541, 'N');
+  I('plant', 130, 1662, 175, 1707);
+  I('plant', 420, 1662, 465, 1707);
+  return finish(b.plan, null);
+}
+
 // 底圖：掃描頁裁切後的影像像素 → 公分 仿射矩陣（依圖面格線圓圈校正）
 const UNDERLAYS = {
   a: { src: 'assets/plan-a.jpg', w: 827, h: 1719, matrix: [1.239618, 0, 0.002648, 1.227596, -265.281036, -231.156396] },
@@ -289,10 +565,12 @@ const UNDERLAYS = {
 };
 
 function finish(plan, key) {
-  plan.underlay = { ...UNDERLAYS[key], opacity: 0.45, visible: false };
+  plan.underlay = key ? { ...UNDERLAYS[key], opacity: 0.45, visible: false } : null;
   return normalizePlan(plan);
 }
 
+export const BUILTIN_VERSION = 2;
+
 export function builtinPlans() {
-  return [planA(), planB(), planC()];
+  return [planA(), planB(), planC(), planD(), planE(), planF()];
 }

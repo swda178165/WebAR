@@ -522,7 +522,7 @@ function flatten(dxf, maxDepth = 5) {
 const WALL_LAYER = /wall|牆|墙|壁|a-wall|^rc$|磚|砖|brick|conc/i;
 const NON_WALL_LAYER = /dim|標註|标注|尺寸|text|文字|hatch|填充|axis|軸|轴|grid|furn|家具|傢俱|設備|equip|door|門|门|window|win|窗|stair|梯|elev|defpoints|title|圖框|图框|frame|note|標示|符號|symbol|land|景|plant|植|site|基地|地界|border/i;
 const DOOR_NAME = /door|門|门|^dr|d\d/i;
-const NOT_EVIDENCE = /area|room|空間|面積|dim|標註|标注|尺寸|text|文字|hatch|填充|axis|軸|轴|grid|furn|家具|傢俱|fixt|設備|equip|stair|梯|title|圖框|frame|defpoints/i;
+const NOT_EVIDENCE = /area|room|空間|面積|dim|標註|标注|尺寸|text|文字|hatch|填充|axis|軸|轴|grid|furn|家具|傢俱|fixt|設備|equip|stair|strs|梯|title|圖框|frame|defpoints/i;
 const WINDOW_NAME = /window|win|窗|^w\d/i;
 
 export function unitScaleFromHeader(header, extentSize) {
@@ -875,6 +875,7 @@ function findOpenings(groups, arcs, segs, candSet) {
   const arcPts = [];
   for (const a of arcs) if (!a.full) arcPts.push(a.c, ...(a.p0 ? [a.p0, a.p1] : []));
   const onArc = (p) => arcPts.some((q) => Math.abs(q.x - p.x) < 1 && Math.abs(q.y - p.y) < 1);
+  const loose = [];
   for (const sg of segs) {
     if (candSet.has(sg) || NOT_EVIDENCE.test(sg.layer)) continue;
     if (onArc(sg.a) || onArc(sg.b)) continue; // 門片線
@@ -882,13 +883,16 @@ function findOpenings(groups, arcs, segs, candSet) {
     if (L < 25) continue;
     const u = mul(d, 1 / L);
     const m = lerpP(sg.a, sg.b, 0.5);
+    let attached = false;
     for (const g of groups) {
       if (Math.abs(dot(u, g.u)) < 0.995) continue;
       if (Math.abs(dot(m, g.n) - g.off) > g.t / 2 + 3) continue;
       const t0 = dot(sg.a, g.u), t1 = dot(sg.b, g.u);
       g.lines.push({ s: Math.min(t0, t1), e: Math.max(t0, t1), layer: sg.layer, dashed: /hidden|dash|虛|虚/i.test(sg.ltype || '') });
+      attached = true;
       break;
     }
+    if (!attached && L >= 40) loose.push(sg);
   }
   for (const g of groups) {
     g.lines.sort((p, q) => p.s - q.s);
@@ -925,6 +929,43 @@ function findOpenings(groups, arcs, segs, candSet) {
       g.ev.push({ s: c.s, e: c.e, type });
     }
   }
+  // --- 證據三：整面幾乎都是窗、兩側牆段太短沒被辨識 → 由窗線本身建立一段牆 ---
+  const L2 = loose.map((sg) => {
+    let u = norm(sub(sg.b, sg.a));
+    if (u.x < -1e-9 || (Math.abs(u.x) < 1e-9 && u.y < 0)) u = mul(u, -1);
+    const n = { x: -u.y, y: u.x };
+    const t0 = dot(sg.a, u), t1 = dot(sg.b, u);
+    return { sg, u, n, off: dot(sg.a, n), s: Math.min(t0, t1), e: Math.max(t0, t1), ang: Math.atan2(u.y, u.x) };
+  });
+  const usedL = new Set();
+  for (let i = 0; i < L2.length; i++) {
+    if (usedL.has(i)) continue;
+    const A = L2[i];
+    const grp = [i];
+    for (let j = i + 1; j < L2.length; j++) {
+      const B = L2[j];
+      if (usedL.has(j) || Math.abs(B.ang - A.ang) > 0.01 || Math.abs(B.off - A.off) > 45) continue;
+      const ov = Math.min(A.e, B.e) - Math.max(A.s, B.s);
+      if (ov < 0.6 * Math.min(A.e - A.s, B.e - B.s)) continue;
+      grp.push(j);
+    }
+    if (grp.length < 2) continue;
+    const offs = grp.map((k) => L2[k].off);
+    const spread = Math.max(...offs) - Math.min(...offs);
+    if (spread < 6 || spread > 45) continue;
+    // 窗框線彼此只差幾公分；間距大（例如 24 cm 的踏步）就不是窗
+    const so = [...offs].sort((x, y) => x - y);
+    if (so.some((v, k) => k > 0 && v - so[k - 1] > 15)) continue;
+    grp.forEach((k) => usedL.add(k));
+    const s0 = Math.min(...grp.map((k) => L2[k].s)), e0 = Math.max(...grp.map((k) => L2[k].e));
+    const layers = grp.map((k) => L2[k].sg.layer).join(' ');
+    const partial = grp.filter((k) => L2[k].e - L2[k].s < (e0 - s0) * 0.8).length;
+    let type = 'window';
+    if (grp.every((k) => /hidden|dash/i.test(L2[k].sg.ltype || ''))) type = 'opening';
+    else if ((DOOR_NAME.test(layers) && !WINDOW_NAME.test(layers)) || (!WINDOW_NAME.test(layers) && partial >= 2)) type = 'sliding';
+    groups.push({ ang: A.ang, off: (Math.max(...offs) + Math.min(...offs)) / 2, t: spread, u: A.u, n: A.n, merged: [], ev: [{ s: s0, e: e0, type }], lines: [], synthetic: true });
+  }
+
   // --- 串接：牆段與開口段依序合併成整面牆 ---
   const walls = [];
   const openings = [];
@@ -936,7 +977,7 @@ function findOpenings(groups, arcs, segs, candSet) {
     ].sort((p, q) => p.s - q.s);
     let run = null;
     const flush = () => {
-      const doorOnly = run && !run.hasWall && run.ops.some((o) => o.type === 'door');
+      const doorOnly = run && !run.hasWall && (run.ops.some((o) => o.type === 'door') || (g.synthetic && run.ops.length));
       if (run && (run.hasWall || doorOnly)) { if (doorOnly) run.wall.soft = true; walls.push(run.wall); }
       else if (run) run.ops.forEach((o) => openings.splice(openings.indexOf(o), 1));
       run = null;
@@ -1015,7 +1056,7 @@ function joinEnds(walls) {
           const t = (r.x * dO.y - r.y * dO.x) / cross;
           const X = add(w.a, mul(dw, t));
           const moveD = dist(X, P);
-          if (moveD > Math.max(w.t, o.t) * 0.9 + 4 + (w.soft ? 16 : 0)) continue;
+          if (moveD > Math.max(w.t, o.t) * 0.9 + 14 + (w.soft ? 16 : 0)) continue;
           const Lo = dist(o.a, o.b);
           const to = dot(sub(X, o.a), dO);
           if (to < -o.t / 2 - w.t - 4 || to > Lo + o.t / 2 + w.t + 4) continue;

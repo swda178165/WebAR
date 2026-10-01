@@ -180,7 +180,7 @@ export function openingEnds(plan, o) {
 export function newPlan(name = '新平面') {
   return {
     id: uid('p'), name, note: '',
-    elevation: 0, floorHeight: DEFAULTS.floorHeight, wallHeight: DEFAULTS.wallHeight,
+    elevation: 0, floorHeight: DEFAULTS.floorHeight, wallHeight: DEFAULTS.wallHeight, style: 'basic',
     walls: [], openings: [], rooms: [], items: [], underlay: null,
   };
 }
