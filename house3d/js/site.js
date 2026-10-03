@@ -6,10 +6,10 @@ import { wallFrame, wallSegments, openingEnds, polygonArea, pointInPolygon, poly
 const D2R = Math.PI / 180;
 
 export const CITIES = {
-  keelung: ['基隆', 25.13], taipei: ['台北', 25.04], newtaipei: ['新北', 25.01], taoyuan: ['桃園', 24.99], hsinchu: ['新竹', 24.80],
-  miaoli: ['苗栗', 24.56], taichung: ['台中', 24.15], changhua: ['彰化', 24.08], nantou: ['南投', 23.91], yunlin: ['雲林', 23.71],
-  chiayi: ['嘉義', 23.48], tainan: ['台南', 22.99], kaohsiung: ['高雄', 22.63], pingtung: ['屏東', 22.67], yilan: ['宜蘭', 24.75],
-  hualien: ['花蓮', 23.99], taitung: ['台東', 22.76], penghu: ['澎湖', 23.57],
+  keelung: ['基隆', 25.13, 121.74], taipei: ['台北', 25.04, 121.56], newtaipei: ['新北', 25.01, 121.46], taoyuan: ['桃園', 24.99, 121.30], hsinchu: ['新竹', 24.80, 120.97],
+  miaoli: ['苗栗', 24.56, 120.82], taichung: ['台中', 24.15, 120.68], changhua: ['彰化', 24.08, 120.54], nantou: ['南投', 23.91, 120.69], yunlin: ['雲林', 23.71, 120.43],
+  chiayi: ['嘉義', 23.48, 120.45], tainan: ['台南', 22.99, 120.21], kaohsiung: ['高雄', 22.63, 120.31], pingtung: ['屏東', 22.67, 120.49], yilan: ['宜蘭', 24.75, 121.75],
+  hualien: ['花蓮', 23.99, 121.60], taitung: ['台東', 22.76, 121.14], penghu: ['澎湖', 23.57, 119.57],
 };
 
 export const DIRS = [['北', 0], ['東北', 45], ['東', 90], ['東南', 135], ['南', 180], ['西南', 225], ['西', 270], ['西北', 315]];
