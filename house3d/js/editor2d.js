@@ -438,6 +438,19 @@ export class Editor2D {
       case 'stair':
         s += this.stairSvg(it);
         break;
+      case 'scooter':
+        s += r(-hw * 0.55, -hd * 0.62, w * 0.55 * 2, d * 1.0, 'body', 10);
+        s += r(-hw * 0.3, -hd * 0.45, w * 0.3 * 2, d * 0.42, 'soft', 6);
+        s += l(-hw, hd - 34, hw, hd - 34, 'thick');
+        s += r(-4, hd - 14, 8, 14, 'dark', 3) + r(-4, -hd, 8, 14, 'dark', 3);
+        break;
+      case 'rack':
+        s += r(-hw, -hd, w, d, 'body dash');
+        for (const y of [-hd * 0.38, 0, hd * 0.38]) s += l(-hw + 3, y, hw - 3, y, 'thin');
+        break;
+      case 'tank':
+        s += c(0, 0, Math.min(hw, hd) * 0.92, 'body') + c(0, 0, Math.min(hw, hd) * 0.4, 'thin');
+        break;
       default:
         s += r(-hw, -hd, w, d, 'body');
     }

@@ -61,7 +61,7 @@ export function core(b, opt) {
 
   // 外牆（厚 18）
   const back = W(0, 0, 600, 0, 18, ext);
-  O(back, opt.backDoor ?? 262, 180, 'sliding');
+  for (const [c, w] of opt.backDoors || [[opt.backDoor ?? 262, 180]]) O(back, c, w, 'sliding');
   W(0, 0, 0, 1550, 18, ext);
   W(600, 0, 600, 1550, 18, ext);
   const front = W(0, 1550, 600, 1550, 18, ext);

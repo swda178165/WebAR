@@ -14,6 +14,10 @@ import {
   sideLabel, dfGrade, dfTarget, dfColor, DF_LEGEND, floorLabel, sunVector, planFrame,
 } from './site.js';
 import { generate, defaultProgram } from './generator.js';
+import { normalizeBuilding } from './building.js';
+import { BuildingUI } from './building-ui.js';
+import { AskUI } from './ask-ui.js';
+import { RenderUI } from './render.js';
 import { saveFile, downloadsCap, readAsText, readAsBuffer, readAsDataURL, imageToUnderlay, openPdf, renderPdfPage, extractPdfVectors } from './files.js';
 
 const STORE_KEY = 'house3d.project.v1';
@@ -121,6 +125,8 @@ class App {
     requestAnimationFrame(() => { this.editor.fit(); this.view.setView('iso', true); });
     this.snapshotBase();
     this.applyMode();
+    this.bmode = !!(this.project.bmode && this.project.building);
+    if (this.bmode) this.applyBmode();
     if (this.ui.welcome) setTimeout(() => this.showWelcome(), 350);
     downloadsCap(); // 在 Claude 檢視器裡預先取得存檔能力，第一次匯出不必等
   }
@@ -132,7 +138,7 @@ class App {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { saved = null; }
     if (saved?.plans?.length) {
-      this.project = { plans: saved.plans.map(normalizePlan), active: saved.active, builtinVersion: saved.builtinVersion || 1, site: normalizeSite(saved.site) };
+      this.project = { plans: saved.plans.map(normalizePlan), active: saved.active, builtinVersion: saved.builtinVersion || 1, site: normalizeSite(saved.site), building: normalizeBuilding(saved.building), bmode: !!saved.bmode };
       // 舊存檔沒有後來新增的提案：補上，不動使用者原本的平面
       if (this.project.builtinVersion < BUILTIN_VERSION) {
         const have = new Set(this.project.plans.map((p) => p.key).filter(Boolean));
@@ -150,7 +156,7 @@ class App {
       }
     } else {
       const plans = builtinPlans();
-      this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION, site: defaultSite() };
+      this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION, site: defaultSite(), building: null, bmode: false };
     }
   }
 
@@ -207,8 +213,8 @@ class App {
     this.renderTabs();
   }
 
-  undo() { const h = this.hist(); if (!h.undo.length) return this.toast('沒有可以復原的步驟'); h.redo.push(h.last); this.restore(h.undo.pop()); }
-  redo() { const h = this.hist(); if (!h.redo.length) return; h.undo.push(h.last); this.restore(h.redo.pop()); }
+  undo() { if (this.bmode) return this.bUndo(); const h = this.hist(); if (!h.undo.length) return this.toast('沒有可以復原的步驟'); h.redo.push(h.last); this.restore(h.undo.pop()); }
+  redo() { if (this.bmode) return this.bRedo(); const h = this.hist(); if (!h.redo.length) return; h.undo.push(h.last); this.restore(h.redo.pop()); }
 
   changed(transient, opts = {}) {
     this.editor.render();
@@ -272,6 +278,9 @@ class App {
   stopSunPlay() { clearInterval(this._sunPlay); this._sunPlay = null; const b = $('#sunPlay'); if (b) b.textContent = '▶'; }
 
   siteChanged() {
+    // 外面狀況問答改了「這棟幾層」：同步到整棟規劃
+    const b = this.project.building;
+    if (b && this.site.floors !== b.n && this.site.floors >= 1 && this.site.floors <= 5) { this.bChange((bb) => { bb.n = this.site.floors; }, 'all'); this.toast(`整棟規劃改成 ${b.n} 層`); }
     this.save();
     this.view.setSunSim({ rebuild: true });
     this.scheduleDaylight();
@@ -377,7 +386,13 @@ class App {
       this.commit();
     };
     // 3D
+    $('#floorSel').addEventListener('change', (e) => { const v = e.target.value; const b = this.project.building; if (!b) return; b.focus = 'all'; this.focusFloor(v === 'all' ? null : v); });
     document.querySelectorAll('#viewSeg button').forEach((b) => b.addEventListener('click', () => {
+      if (this.bmode && b.dataset.view === 'walk') {
+        const f = this.project.building?.focus;
+        if (!f || f === 'all') { this.toast('先在左邊選一層（或在 3D 點一層），再按漫遊走進去'); return; }
+        this.openFloor(f);
+      }
       document.querySelectorAll('#viewSeg button').forEach((x) => x.classList.toggle('on', x === b));
       this.view.setView(b.dataset.view);
       $('#walkpad').hidden = b.dataset.view !== 'walk';
@@ -428,6 +443,9 @@ class App {
     $('#fileInput').addEventListener('change', (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) this.importFile(f); });
     $('#btnHelp').onclick = () => this.showHelp();
     $('#btnGen').onclick = () => this.openGenerator();
+    $('#btnAsk').onclick = () => this.openAsk();
+    $('#btnRender').onclick = () => this.openRender();
+    $('#btnPano').onclick = () => this.openPano();
     $('#btnSite').onclick = () => this.openSiteWizard();
     $('#brand').onclick = () => this.showWelcome();
     $('#brand').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.showWelcome(); } };
@@ -469,7 +487,7 @@ class App {
     if (c === 'mode') return this.setMode(!this.ui.simple);
     if (c === 'undo') this.undo();
     if (c === 'redo') this.redo();
-    if (c === 'delete') { if (this.sel) this.deleteSel(); else this.toast('先選取要刪除的東西'); }
+    if (c === 'delete') { if (this.bmode) return; if (this.sel) this.deleteSel(); else this.toast('先選取要刪除的東西'); }
   }
 
   onKey(e) {
@@ -479,6 +497,7 @@ class App {
     if (mod && e.key.toLowerCase() === 'z') { if (typing) return; e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); return; }
     if (mod && e.key.toLowerCase() === 'y') { if (typing) return; e.preventDefault(); this.redo(); return; }
     if (typing) return;
+    if (this.bmode) return;
     if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); this.duplicateSel(); return; }
     if (e.key === 'Escape') {
       if (!$('#modal').hidden) return;
@@ -559,6 +578,9 @@ class App {
         <li><b>拖拉修改：</b>在平面圖上直接拖牆（兩側相連的牆會跟著伸縮）、拖門窗沿牆滑動、拖家具（3D 裡也能拖）。選取後右側可輸入精確尺寸。</li>
         <li><b>畫新東西：</b>左側工具可畫牆、放門窗、放家具；「房間」點在牆圍起的區域內會自動算面積。</li>
         <li><b>丟檔案進來：</b>把 <b>DXF</b>（AutoCAD：另存新檔 → DXF）拖進視窗，自動辨識牆、門、房間產生 3D；由 CAD 直接輸出的向量 <b>PDF</b> 也能自動辨識；掃描圖或照片會變成底圖讓你描。</li>
+        <li><b>整棟：</b>上方「🏢 整棟」設定蓋幾層、每層做什麼（一樓大空間＋機車、出租套房、自住、頂樓屋突＋房間），程式會把每一層排好；右側可改一樓出入口、機車台數、出租間數、頂樓房間，以及外牆材質、顏色、窗框、欄杆、屋頂。3D 會疊出整棟外觀，點一層可以剖開看裡面，點兩下打開那層的平面。</li>
+        <li><b>用講的改：</b>按「用講的改」，打字或按 🎤 說「主臥大一點」「多一間小孩房」「二樓改自住」「機車停 6 台」「外牆換清水模」「沙發換成雲朵沙發」，程式會直接改；每一步都能按「復原」。在 Claude 裡開啟時，聽不懂的話會請 Claude 幫忙翻成動作。</li>
+        <li><b>擬真效果圖、360°：</b>3D 下方「📷 效果圖」用光線追蹤算出光從窗戶照進來、在牆面反彈的樣子（先按「漫遊」走進房間，就是室內照）；「🌐 360°」站在房間中間轉一圈，可以拖著看、手機轉著看，也能下載成 Facebook 認得的 360 照片。</li>
         <li><b>自動規劃：</b>按上方「自動規劃」，選幾房、幾衛、要不要書房／和室／神明廳等，程式會試過上百種配置、實際排家具並模擬採光，挑出幾種給你比較，喜歡的可以加入成新平面再拖拉修改。</li>
         <li><b>基地・採光：</b>右側「基地・採光」設定座向、隔壁、馬路與對面樓高，程式會算出每個房間的採光與冬至日照，「依基地條件自動開窗」會把窗開在光線最好的位置；平面圖下方「採光」顯示亮暗分布，3D 的「日照」可以看某月某時陽光照進屋內的樣子。</li>
         <li><b>風格與款式：</b>3D 下方「風格」會整套換材質與家具款式（日式低床、北歐錐腳沙發、侘寂雲朵沙發、工業皮沙發、輕奢弧形沙發…）；單件家具也能在右側「款式」個別指定。</li>
@@ -577,7 +599,10 @@ class App {
         const ok = await this.choose('還原原始方案？', '目前所有修改與匯入的平面都會被取代。', [{ label: '確定還原', value: true }]);
         if (!ok) return;
         const plans = builtinPlans();
-        this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION, site: this.site };
+        this.project = { plans, active: plans[0].id, builtinVersion: BUILTIN_VERSION, site: this.site, building: null, bmode: false };
+        this.bmode = false;
+        this.bhist = null;
+        this.applyBmode();
         this.history.clear();
         this.sel = null;
         this.snapshotBase();
@@ -938,6 +963,7 @@ class App {
       <p>不用會 CAD，點一個開始就好。之後點左上角的房子圖示，可以回到這裡。</p>
       <div class="welcome-cards">
         <button data-w="look"><span class="emo" aria-hidden="true">🏠</span><b>看看平面圖的 3D</b><small>媽媽畫的方案和建議方案，轉一轉、走進去看、拖家具</small></button>
+        <button data-w="bld"><span class="emo" aria-hidden="true">🏢</span><b>整棟怎麼分</b><small>蓋幾層、每層做什麼（一樓大空間、出租、自住、頂樓），連外觀一起排</small></button>
         <button data-w="gen"><span class="emo" aria-hidden="true">✨</span><b>幫我排格局</b><small>選家裡有誰住、要幾房，程式排出幾種給你比</small></button>
         <button data-w="site"><span class="emo" aria-hidden="true">☀️</span><b>告訴程式外面的狀況</b><small>房子朝哪邊、隔壁和馬路是什麼，算出哪間最亮、窗開哪裡</small></button>
         <button data-w="file"><span class="emo" aria-hidden="true">📂</span><b>我有 CAD 圖或照片</b><small>把 DXF、PDF 或照片丟進來，自動變成 3D</small></button>
@@ -952,6 +978,7 @@ class App {
         close();
         if (w === 'look') { if (!this.ui.toured) setTimeout(() => this.startTour(), 250); }
         if (w === 'gen') this.openGenerator();
+        if (w === 'bld') { if (this.project.building) this.enterBuilding(); else this.openBuildingWizard(); }
         if (w === 'site') this.openSiteWizard();
         if (w === 'file') $('#fileInput').click();
         if (w === 'mode') this.setMode(!this.ui.simple);
@@ -961,6 +988,8 @@ class App {
 
   quick(k) {
     if (k === 'gen') return this.openGenerator();
+    if (k === 'ask') return this.openAsk();
+    if (k === 'bld') return this.enterBuilding();
     if (k === 'site') return this.openSiteWizard();
     if (k === 'tour') return this.startTour();
     if (k === 'furn') {
@@ -977,7 +1006,10 @@ class App {
       { el: '#pane3d', view: '3d', t: '這是 3D', d: '拖曳可以轉來轉去，兩指或滾輪放大。下面的「漫遊」可以走進房子裡看。' },
       { el: '#styleSel', view: '3d', t: '換裝潢風格', d: '日式、北歐、侘寂、工業、輕奢，牆面地板和家具款式會整套換。' },
       { el: '#planTabs', t: '不同的方案', d: '上面一排是不同的平面方案，點一下就切換；右邊的「＋」可以複製一份來改。' },
+      { el: '#tabBuilding', t: '整棟', d: '蓋幾層、每層做什麼（一樓大空間、出租、自住、頂樓），外觀要什麼樣子，都在這裡。' },
+      { el: '#btnAsk', t: '用講的改', d: '打字或用說的：「主臥大一點」「二樓改自住」「外牆換清水模」，程式直接幫你改。' },
       { el: '#btnGen', t: '幫我排格局', d: '選家裡有誰住、要幾房，程式會排出幾種格局，連家具都擺好。' },
+      { el: '#btnRender', view: '3d', t: '擬真效果圖、360°', d: '算出像照片的效果圖；360° 可以站在房間裡轉一圈看，還能下載成 360 照片。' },
       { el: '#btnSite', t: '外面的狀況', d: '回答房子朝哪邊、隔壁是什麼，程式會算出每間房的亮度，還能自動決定窗戶開在哪。' },
       { el: '[data-cmd=undo]', view: '2d', t: '改壞了不用怕', d: '按「復原」就回到上一步，可以一直按。所有修改都會自動存在這台裝置上。' },
     ];
@@ -1193,8 +1225,15 @@ class App {
   // ---------- 平面分頁 ----------
   renderTabs() {
     const nav = $('#planTabs');
-    nav.innerHTML = this.project.plans.map((p) => `<button class="tab${p.id === this.plan.id ? ' on' : ''}" data-id="${p.id}">${esc(p.name)}${p.elevation ? `<small>+${p.elevation}</small>` : ''}</button>`).join('') +
+    const b = this.project.building;
+    const order = b ? this.floors().map((f) => b.plans[f.id]) : [];
+    const floorPlans = order.map((id) => this.project.plans.find((p) => p.id === id)).filter(Boolean);
+    const others = this.project.plans.filter((p) => !floorPlans.includes(p));
+    const tab = (p, fl) => `<button class="tab${fl ? ' fl' : ''}${!this.bmode && p.id === this.plan.id ? ' on' : ''}" data-id="${p.id}">${esc(p.name)}${!fl && p.elevation ? `<small>+${p.elevation}</small>` : ''}</button>`;
+    nav.innerHTML = `<button class="tab bld${this.bmode ? ' on' : ''}" id="tabBuilding" title="整棟：每層做什麼、外觀">🏢 整棟</button>` +
+      floorPlans.map((p) => tab(p, true)).join('') + (floorPlans.length && others.length ? '<span class="tab-sep" aria-hidden="true"></span>' : '') + others.map((p) => tab(p, false)).join('') +
       '<button class="tab add" id="addPlan" title="新增平面" aria-label="新增平面">＋</button>';
+    $('#tabBuilding').onclick = () => this.enterBuilding();
     nav.querySelectorAll('.tab[data-id]').forEach((b) => b.addEventListener('click', () => this.switchPlan(b.dataset.id)));
     $('#addPlan').onclick = async () => {
       const v = await this.choose('新增平面', '', [
@@ -1216,6 +1255,7 @@ class App {
 
   switchPlan(id) {
     if (this.editor.draft) this.editor.finishDraft();
+    if (this.bmode) { this.bmode = false; this.project.bmode = false; this.applyBmode(); }
     this.project.active = id;
     this.sel = null;
     this.snapshotBase();
@@ -1306,6 +1346,7 @@ class App {
   }
 
   renderProps() {
+    if (this.bmode && this.building) return this.renderBldPanel();
     const el = $('#props');
     const p = this.plan;
     const s = this.sel;
@@ -1355,7 +1396,7 @@ class App {
       const indoor = p.rooms.filter((r) => !['balcony', 'void'].includes(r.kind)).reduce((sum, r) => sum + areaM2(r.pts), 0);
       const balcony = p.rooms.filter((r) => r.kind === 'balcony').reduce((sum, r) => sum + areaM2(r.pts), 0);
       h += `<div class="sec simple-only quick"><h3>怎麼開始</h3>
-        <div class="quick-btns"><button class="btn" data-qa="gen">✨ 幫我排格局</button><button class="btn" data-qa="site">☀️ 外面狀況</button><button class="btn" data-qa="furn">🛋️ 加家具</button><button class="btn" data-qa="tour">👆 教我用</button></div>
+        <div class="quick-btns"><button class="btn" data-qa="gen">✨ 幫我排格局</button><button class="btn" data-qa="ask">💬 用講的改</button><button class="btn" data-qa="bld">🏢 整棟</button><button class="btn" data-qa="site">☀️ 外面狀況</button><button class="btn" data-qa="furn">🛋️ 加家具</button><button class="btn" data-qa="tour">👆 教我用</button></div>
         <p class="note">點平面圖上的家具、牆或房間，這裡就會出現可以改的項目。改壞了按左邊「復原」。</p></div>`;
       h += `<div class="sec"><h3>平面</h3><h2>${esc(p.name)}</h2>${p.note ? `<p class="note">${esc(p.note)}</p>` : ''}
         ${p.brief?.length ? `<details class="brief" open><summary>設計重點</summary><ul>${p.brief.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></details>` : ''}
@@ -1625,4 +1666,7 @@ class App {
   }
 }
 
+Object.defineProperties(App.prototype, Object.getOwnPropertyDescriptors(BuildingUI));
+Object.defineProperties(App.prototype, Object.getOwnPropertyDescriptors(AskUI));
+Object.defineProperties(App.prototype, Object.getOwnPropertyDescriptors(RenderUI));
 window.house3d = new App();

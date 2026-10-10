@@ -877,7 +877,99 @@ function hall(L, opt) {
   if (Math.min(L.W, L.H) >= 170) shelf(L, 120, '展示櫃', 35);
 }
 
+// ---------- 出租套房、公共空間、店面、頂樓 ----------
+// 沿牆放一件設備：前方留操作空間，盡量跟已放的東西排成一列、靠近指定點（例如管道間）
+function wallItem(L, kind, w, d, extra = {}, near = null, front = 60) {
+  let best = null;
+  const tall = extra.h ?? CATALOG[kind]?.h ?? 0;
+  for (const e of EDGES) for (const { t, a, b } of L.slots(e, w, { tall: tall > 100 ? tall : 0 }, 5)) {
+    const r = L.rectAt(e, w, d, t);
+    if (!L.free(r)) continue;
+    const fz = L.front(r, e, front);
+    if (!L.inside(fz) || L.hits(fz, L.occ)) continue;
+    let s = 0;
+    if (near) s -= dist({ x: cx(r), y: cy(r) }, near) / 100;
+    if (L.items.length && L.hits({ x0: r.x0 - 3, x1: r.x1 + 3, y0: r.y0 - 3, y1: r.y1 + 3 }, L.items.map(itemRect))) s += 1.2;
+    if (t <= a + 1 || t >= b - w - 1) s += 0.3;
+    if (!best || s > best.s) best = { r, e, s };
+  }
+  if (!best) return null;
+  L.clear.push(L.front(best.r, best.e, front));
+  return L.add(kind, best.r, best.e, extra);
+}
+
+function itemRect(it) {
+  const side = it.rot === 90 || it.rot === 270;
+  const w = side ? it.d : it.w, d = side ? it.w : it.d;
+  return { x0: it.x - w / 2, x1: it.x + w / 2, y0: it.y - d / 2, y1: it.y + d / 2 };
+}
+
+function nearestDuct(L, opt) {
+  const c = { x: (L.ix0 + L.ix1) / 2, y: (L.iy0 + L.iy1) / 2 };
+  let best = null;
+  for (const d of opt.ducts || []) if (!best || dist(d, c) < dist(best, c)) best = d;
+  return best;
+}
+
+// 出租套房：學生用單人床、書桌、衣櫃、小冰箱
+function tenant(L, opt) {
+  bedroom(L, { ...opt, role: L.area >= 14 ? 'guest' : 'kid', rug: false });
+  if (!L.items.some((i) => i.kind === 'desk')) desk(L, 100);
+  const f = L.corner(55, 55);
+  if (f) L.add('fridge', f.r, f.e, { label: '小冰箱', h: 85, w: 55, d: 55 });
+}
+
+// 共用茶水洗衣間
+function pantry(L, opt) {
+  const near = nearestDuct(L, opt);
+  wallItem(L, 'counter', 120, 60, { top: 'sink', label: '水槽' }, near);
+  wallItem(L, 'counter', 60, 60, { label: '微波爐台' }, near);
+  wallItem(L, 'fridge', 70, 70, { label: '共用冰箱' }, near);
+  wallItem(L, 'washer', 60, 62, { label: '洗衣機' }, near);
+  wallItem(L, 'washer', 60, 62, { label: '烘衣機' }, near);
+  if (L.area >= 7) { dining(L, { seats: 2, sideboard: false }); relabel(L, 'table', '小餐桌'); }
+}
+
+function relabel(L, kind, label) {
+  for (let i = L.items.length - 1; i >= 0; i--) if (L.items[i].kind === kind) { L.items[i].label = label; return; }
+}
+
+// 公共梯廳／玄關：鞋櫃、信箱
+function lobby(L, opt) {
+  entry(L, opt);
+  wallItem(L, 'cabinet', 80, 30, { label: '信箱', h: 120 }, opt.entrance, 80);
+}
+
+// 頂樓露台：曬衣架、戶外桌、植栽
+function terrace(L, opt) {
+  wallItem(L, 'rack', 160, 50, { label: '曬衣架' }, opt.near || null, 70);
+  wallItem(L, 'rack', 160, 50, { label: '曬衣架' }, opt.near || null, 70);
+  dining(L, { seats: 4, sideboard: false });
+  relabel(L, 'table', '戶外桌');
+  for (let i = 0; i < 5; i++) { const p = L.corner(50, 50); if (!p) break; L.add('plant', p.r, p.e); }
+}
+
+// 一樓店面：櫃台、展示架、展示桌
+function shop(L, opt) {
+  wallItem(L, 'counter', 160, 60, { label: '櫃台', h: 100 }, opt.entrance || null, 90);
+  for (let i = 0; i < 4; i++) if (!shelf(L, 240, '展示架', 45)) break;
+  dining(L, { seats: 2, sideboard: false });
+  relabel(L, 'table', '展示桌');
+  for (let i = L.items.length - 1; i >= 0; i--) if (L.items[i].kind === 'chair') L.items.splice(i, 1);
+  for (let i = 0; i < 2; i++) { const p = L.corner(50, 50); if (!p) break; L.add('plant', p.r, p.e); }
+}
+
+// 一樓工作室：辦公桌、會議桌、檔案櫃
+function office(L, opt) {
+  for (let i = 0; i < 4; i++) if (!desk(L, 120, '辦公桌')) break;
+  shelf(L, 200, '檔案櫃', 40);
+  dining(L, { seats: 6, sideboard: false });
+  relabel(L, 'table', '會議桌');
+  void opt;
+}
+
 const RECIPES = {
+  tenant, pantry, lobby, terrace, shop, office,
   master: (L, o) => bedroom(L, { ...o, role: 'master' }),
   elder: (L, o) => bedroom(L, { ...o, role: 'elder' }),
   kid: (L, o) => bedroom(L, { ...o, role: 'kid' }),

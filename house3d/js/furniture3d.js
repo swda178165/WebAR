@@ -983,6 +983,32 @@ const BUILDERS = {
     K.box(w * 0.3, 3, 1, 0, 95, -hd + 3, M.dark);
   },
   box(c) { c.K.box(c.w, c.H, c.d, 0, 0, 0, c.M.stone); },
+  // 機車：車頭朝 +z（正面）
+  scooter(c) {
+    const { K, M, w, d, hd, rand } = c;
+    const paint = [M.white, M.dark, M.fabric2, M.accent || M.fabric3][Math.floor(rand() * 4)];
+    for (const z of [hd - 30, -hd + 30]) { const t = K.cyl(28, 9, 28, 0, 0, z, M.black, 20); if (t) { t.rotation.z = Math.PI / 2; t.position.set(0, 28, z); } }
+    K.rbox(w * 0.55, 18, d * 0.48, 5, 0, 26, -10, paint);
+    K.rbox(w * 0.5, 10, d * 0.36, 4, 0, 44, -22, M.black);
+    K.rbox(w * 0.62, 62, 16, 6, 0, 22, hd - 42, paint);
+    K.rod([0, 84, hd - 40], [0, 100, hd - 34], 2.4, M.metal);
+    K.rod([-w * 0.42, 102, hd - 34], [w * 0.42, 102, hd - 34], 1.6, M.metal);
+    K.sphere(7, 6, 4, 0, 92, hd - 30, M.porcelain, 12);
+    K.box(w * 0.5, 4, 26, 0, 22, -hd + 34, M.metal);
+  },
+  // 曬衣架：兩端 A 字腳、三根橫桿
+  rack(c) {
+    const { K, M, hw, hd, H } = c;
+    for (const x of [-hw + 3, hw - 3]) { K.rod([x, 0, -hd + 2], [x, H, 0], 1.4, M.stainless); K.rod([x, 0, hd - 2], [x, H, 0], 1.4, M.stainless); }
+    for (const [y, z] of [[H, 0], [H - 30, -hd * 0.38], [H - 30, hd * 0.38]]) K.rod([-hw + 3, y, z], [hw - 3, y, z], 1.1, M.stainless);
+    for (let x = -hw + 25; x < hw - 20; x += 32) K.box(26, 46, 1.5, x, H - 50, 0, [M.bedding, M.fabric2, M.throw, M.fabric3][Math.abs(Math.round(x)) % 4]);
+  },
+  tank(c) {
+    const { K, M, w, d, H } = c;
+    K.box(w, 24, d, 0, 0, 0, M.dark);
+    K.cyl(w * 0.46, H - 34, d * 0.46, 0, 24, 0, M.stainless, 28);
+    K.cone(w * 0.42, w * 0.47, 10, 0, H - 10, 0, M.stainless, 28);
+  },
   stair(c) {
     const sg = stairGeometry(c.it);
     for (const s of sg.steps3d) c.K.box(s.x1 - s.x0, s.top, s.y1 - s.y0, (s.x0 + s.x1) / 2, 0, (s.y0 + s.y1) / 2, c.M.stone);

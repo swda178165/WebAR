@@ -37,6 +37,9 @@ export const CATALOG = {
   lowtable: { name: '和室桌', w: 90, d: 60, h: 35, group: '客餐廳' },
   stool: { name: '吧檯椅', w: 40, d: 40, h: 68, group: '廚房' },
   altar: { name: '神明桌', w: 160, d: 100, h: 105, group: '其他' },
+  scooter: { name: '機車', w: 70, d: 190, h: 110, group: '其他' },
+  rack: { name: '曬衣架', w: 160, d: 50, h: 160, group: '陽台' },
+  tank: { name: '水塔', w: 120, d: 120, h: 150, group: '設備' },
   box: { name: '方塊', w: 60, d: 60, h: 60, group: '其他' },
 };
 

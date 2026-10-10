@@ -2,12 +2,13 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 import {
-  wallFrame, wallSegments, wallExtents, openingEnds, polygonCentroid, areaM2, ROOM_KINDS, planBounds, itemCorners,
+  wallFrame, wallSegments, wallExtents, openingEnds, polygonCentroid, areaM2, ROOM_KINDS, planBounds, itemCorners, pointInPolygon as pointIn,
 } from './model.js';
 import { itemHeight, itemElev } from './catalog.js';
 import { STYLES } from './styles.js';
 import { buildItem, buildPendants } from './furniture3d.js';
 import { latOf, sunPosition, sunVector, planFrame, buildingTop, roofLevel, STOREY_H } from './site.js';
+import { floorList, FRAMES } from './building.js';
 
 const SLAB = 15;
 
@@ -69,7 +70,9 @@ export class View3D {
     this.scene.add(this.root);
 
     this.styleKey = 'basic';
-    this.mats = makeMaterials('basic');
+    this._mats = new Map();
+    this.mats = this.matsFor('basic');
+    this.out = this.root;
     this.cutHeight = 160; // null＝完整牆高；預設剖切成「娃娃屋」看得到室內
     this.showLabels = true;
     this.mode = 'orbit';
@@ -86,20 +89,29 @@ export class View3D {
     this.renderer.setAnimationLoop(() => this.tick());
   }
 
+  // 各風格的材質（整棟模式會同時用到好幾種，所以留著不丟）
+  matsFor(key) {
+    const k = STYLES[key] ? key : 'basic';
+    if (!this._mats.has(k)) {
+      const m = makeMaterials(k);
+      if (this.dark !== undefined) m.cap.color.set(this.dark ? 0x1d2024 : 0x3a3e44);
+      this._mats.set(k, m);
+    }
+    return this._mats.get(k);
+  }
+
   setStyle(key) {
     const k = STYLES[key] ? key : 'basic';
     if (k === this.styleKey) return;
-    disposeMaterials(this.mats);
     this.styleKey = k;
-    this.mats = makeMaterials(k);
-    if (this.dark !== undefined) this.mats.cap.color.set(this.dark ? 0x1d2024 : 0x3a3e44);
+    this.mats = this.matsFor(k);
     this.invalidate();
   }
 
   setTheme(dark) {
     this.dark = dark;
     this.ground.material.color.set(dark ? 0x2a2d31 : 0xd8d3c8);
-    this.mats.cap.color.set(dark ? 0x1d2024 : 0x3a3e44);
+    for (const m of this._mats.values()) m.cap.color.set(dark ? 0x1d2024 : 0x3a3e44);
     this.invalidate();
   }
 
@@ -119,6 +131,7 @@ export class View3D {
   invalidate() { this.pending = true; }
 
   tick() {
+    if (this.paused) return; // 擬真渲染時暫停即時畫面，把顯示卡讓給光線追蹤
     if (this.pending && !this.drag3d) { this.pending = false; this.rebuild(); }
     if (this.mode === 'walk') this.walkStep();
     this.controls.update();
@@ -127,6 +140,7 @@ export class View3D {
 
   // ---------- 建模 ----------
   clearRoot() {
+    for (const l of this.scene.children.filter((o) => o.userData.renderLight)) this.scene.remove(l);
     this.root.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       if (o.material && o.userData.ownMaterial) {
@@ -138,48 +152,72 @@ export class View3D {
   }
 
   rebuild() {
+    this.out = this.root;
+    if (this.app.bmode && this.app.project.building) {
+      this.clearRoot();
+      this.buildBuilding();
+      this.updateSelection();
+      if (this.first) { this.first = false; this.setView('iso', true); }
+      return;
+    }
+    this.bstate = null;
+    this.targetY = null;
     const plan = this.app.plan;
     if (!plan) return;
     if ((plan.style || 'basic') !== this.styleKey) this.setStyle(plan.style || 'basic');
     this.clearRoot();
-    const M = this.mats;
-    const cut = this.cutHeight;
-    const sunOn = this.sunSim.on;
+    const rm = this.renderMode;
+    const sunOn = this.sunSim.on && !rm;
+    const cut = rm?.interior ? null : this.cutHeight;
+    this.buildPlanBody(plan, { cut, sunOn, labels: this.showLabels && !rm });
+    if (sunOn) this.buildContext(plan, cut);
+    if (rm?.interior) { this.buildCeilings(plan, rm); this.buildRenderContext(plan); }
+    if (!rm) this.updateSelection();
+    this.fitShadows(plan);
+    this.updateSun();
+    if (this.first) { this.first = false; this.setView('iso', true); }
+  }
 
+  // 一層平面的樓板、牆、門窗、家具、標籤。bld：整棟模式的外觀設定（外牆材質、欄杆、樓高）
+  buildPlanBody(plan, { cut = null, sunOn = false, labels = false, items = true, bld = null } = {}) {
+    const M = this.mats;
     // 樓板＋地坪
     for (const r of plan.rooms) {
       if (r.pts.length < 3) continue;
       const shape = new THREE.Shape(r.pts.map((p) => new THREE.Vector2(p.x, p.y)));
       if (r.kind === 'void') {
+        if (bld && (plan.elevation || 0) > 1) continue; // 整棟模式：天井往下看得到一樓的天井地面
         const g = new THREE.ShapeGeometry(shape);
         g.rotateX(Math.PI / 2);
-        const m = new THREE.Mesh(g, M.voidFloor);
-        m.position.y = sunOn ? -(plan.elevation || 0) + 2 : -140;
-        this.root.add(m);
+        const m = new THREE.Mesh(g, bld ? M.floor.balcony : M.voidFloor);
+        m.position.y = bld ? 1 : sunOn ? -(plan.elevation || 0) + 2 : -140;
+        m.receiveShadow = !!bld;
+        this.out.add(m);
         continue;
       }
       const g = new THREE.ExtrudeGeometry(shape, { depth: SLAB, bevelEnabled: false });
       g.rotateX(Math.PI / 2);
       const floor = M.floor[r.kind] || M.floor.other;
-      const mesh = new THREE.Mesh(g, [floor, M.slabSide]);
+      const mesh = new THREE.Mesh(g, [floor, bld ? bld.F.slab : M.slabSide]);
       mesh.receiveShadow = true;
+      mesh.castShadow = !!bld;
       mesh.userData = { kind: 'room', id: r.id };
-      this.root.add(mesh);
+      this.out.add(mesh);
     }
 
     // 牆
-    for (const w of plan.walls) this.buildWall(plan, w, cut, sunOn);
-    if (sunOn) this.buildContext(plan, cut);
+    for (const w of plan.walls) this.buildWall(plan, w, cut, sunOn, bld);
 
     // 家具
-    for (const it of plan.items) {
+    if (items) for (const it of plan.items) {
+      if (bld && !bld.focus && ['ac', 'rug', 'chair'].includes(it.kind)) continue;
       const g = buildItem(it, M, cut, plan);
       g.position.set(it.x, itemElev(it), it.y);
       g.rotation.y = -(it.rot || 0) * Math.PI / 180;
       g.traverse((o) => { if (o.isMesh) { o.castShadow = o.userData.noShadow ? false : true; o.receiveShadow = true; o.userData.itemId = it.id; } });
       g.userData.itemId = it.id;
-      this.root.add(g);
-      this.itemGroups.set(it.id, g);
+      this.out.add(g);
+      if (!bld) this.itemGroups.set(it.id, g);
       if ((it.kind === 'table' || it.kind === 'island') && it.pendant !== false) {
         const pg = buildPendants(plan, it, M, cut);
         if (pg) { g.add(pg); pg.position.y = -itemElev(it); }
@@ -187,21 +225,316 @@ export class View3D {
     }
 
     // 標籤
-    if (this.showLabels) {
+    if (labels) {
       for (const r of plan.rooms) {
         if (!r.name || r.pts.length < 3) continue;
+        if (bld && r.kind === 'void') continue;
         const c = r.label || polygonCentroid(r.pts);
         const a = areaM2(r.pts);
         const lab = makeLabel(r.name, r.kind === 'void' ? '' : `${a.toFixed(1)}㎡`);
         lab.position.set(c.x, r.kind === 'void' ? -138 : 1.2, c.y);
-        this.root.add(lab);
+        this.out.add(lab);
       }
     }
+  }
 
-    this.updateSelection();
-    this.fitShadows(plan);
-    this.updateSun();
-    if (this.first) { this.first = false; this.setView('iso', true); }
+  // ---------- 整棟外觀 ----------
+  buildBuilding() {
+    const app = this.app;
+    const b = app.project.building;
+    const site = app.site;
+    const floors = floorList(b, site);
+    const focus = floors.some((f) => f.id === b.focus) ? b.focus : 'all';
+    const fi = floors.findIndex((f) => f.id === focus);
+    const F = this.facadeMats(b.facade);
+    const base0 = this.matsFor('basic');
+    let top = 0, roofPlan = null, topFull = null;
+    const shown = [];
+    for (let i = 0; i < floors.length; i++) {
+      const fl = floors[i];
+      if (fi >= 0 && i > fi) break;
+      const p = app.floorPlan(fl);
+      if (!p) continue;
+      const g = new THREE.Group();
+      g.position.y = fl.elev;
+      g.userData.floor = fl.id;
+      this.root.add(g);
+      this.out = g;
+      const isFocus = fl.id === focus;
+      const base = this.matsFor(p.style || 'basic');
+      this.mats = { ...base, alu: F.frame, aluLine: F.frameLine, ...(isFocus ? {} : { glass: F.glass }) };
+      this.buildPlanBody(p, {
+        cut: isFocus ? (this.cutHeight ?? null) : null, labels: isFocus && this.showLabels && !this.renderMode,
+        items: isFocus || fl.level === 1 || !!fl.roof,
+        bld: { F, rail: b.facade.rail, awning: !!b.facade.awning, elev: fl.elev, focus: isFocus },
+      });
+      g.traverse((o) => { o.userData.floor = fl.id; });
+      shown.push({ fl, p });
+      top = Math.max(top, fl.elev + (fl.roof ? (p.floorHeight || 350) : (p.floorHeight || 350)));
+      if (fl.roof) roofPlan = { fl, p };
+      else topFull = { fl, p };
+    }
+    this.mats = base0;
+    this.out = this.root;
+    const allShown = fi < 0;
+    // 屋頂：頂樓房間上方，或沒有頂樓時蓋在最上面一層
+    if (allShown) {
+      if (roofPlan) this.buildRoofTop(roofPlan.p, roofPlan.fl.elev + (roofPlan.p.floorHeight || 350), b.facade, F, true);
+      else if (topFull) this.buildRoofTop(topFull.p, topFull.fl.elev + (topFull.p.floorHeight || 350), b.facade, F, false);
+      if (b.facade.grille && b.facade.grille !== 'none') this.buildGrille(floors, top, F);
+    }
+    if (roofPlan && allShown) top += b.facade.roof === 'pitched' ? 170 : 180;
+    this.buildNeighbors(site, F);
+    if (!this.renderMode) this.buildFloorTags(shown, focus);
+    // 取景
+    const minY = -131, maxY = 1722;
+    const cx = 3, cz = (minY + maxY) / 200;
+    const h = Math.max(3, top / 100);
+    this.center = new THREE.Vector3(cx, 0, cz);
+    this.targetY = fi >= 0 ? (floors[fi].elev + 120) / 100 : h * 0.45;
+    this.size = { w: 6.6, d: (maxY - minY) / 100, h, y0: 0 };
+    this.radius = Math.max(9, h / 2 + 4);
+    const cam = this.sun.shadow.camera;
+    const R = Math.max(12, h * 0.75 + 4);
+    cam.left = -R; cam.right = R; cam.top = R; cam.bottom = -R; cam.near = 0.5; cam.far = 120;
+    cam.updateProjectionMatrix();
+    this.sun.position.set(cx - 14, h + 18, cz - 10);
+    this.sun.target.position.set(cx, h / 3, cz);
+    this.ground.position.set(cx, -(SLAB + 1) / 100, cz);
+    this.hemi.intensity = 1.35; this.fill.intensity = 0.45; this.sun.intensity = 2.3;
+    this.bstate = { floors, focus, top };
+  }
+
+  // ---------- 擬真渲染用：天花板、室內燈、窗外的環境 ----------
+  buildCeilings(plan, rm) {
+    const H = plan.wallHeight || 300;
+    const mat = this._ceilMat || (this._ceilMat = new THREE.MeshStandardMaterial({ color: 0xf4f2ec, roughness: 0.95 }));
+    const lampMat = this._lampMat || (this._lampMat = new THREE.MeshStandardMaterial({ color: 0xfff2dc, emissive: new THREE.Color(0xffe2b8), emissiveIntensity: 6 }));
+    for (const r of plan.rooms) {
+      if (r.kind === 'void' || r.pts.length < 3) continue;
+      const sh = new THREE.Shape(r.pts.map((p) => new THREE.Vector2(p.x, p.y)));
+      const g = new THREE.ExtrudeGeometry(sh, { depth: 12, bevelEnabled: false });
+      g.rotateX(Math.PI / 2);
+      const m = new THREE.Mesh(g, mat);
+      m.position.y = H + 12;
+      m.userData.ceiling = true;
+      this.out.add(m);
+      if (rm?.night && !['balcony', 'stair', 'elevator'].includes(r.kind)) {
+        // 晚上：每個房間天花板一盞崁燈（點光源＋發光燈罩）
+        const c = polygonCentroid(r.pts);
+        const a = areaM2(r.pts);
+        const disc = new THREE.Mesh(new THREE.CylinderGeometry(7, 7, 1.5, 20), lampMat);
+        disc.position.set(c.x, H - 1, c.y);
+        this.out.add(disc);
+        const pl = new THREE.PointLight(0xffd6a0, Math.min(60, 10 + a * 2.2), 0, 2);
+        pl.position.set(c.x / 100, (H - 20) / 100 + (this.out.position?.y || 0) / 100, c.y / 100);
+        pl.userData.renderLight = true;
+        this.scene.add(pl);
+      }
+    }
+  }
+
+  buildRenderContext(plan) {
+    const site = this.app.site;
+    const elev = plan.elevation || 0;
+    const fr = planFrame(plan);
+    const grey = this._ctxOpaque || (this._ctxOpaque = new THREE.MeshStandardMaterial({ color: 0xc9c6bf, roughness: 0.95 }));
+    const box = (x0, x1, y0, y1, z0, z1) => {
+      if (x1 - x0 < 1 || y1 - y0 < 1 || z1 - z0 < 1) return;
+      const m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0), grey);
+      m.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+      m.userData.ctx = true;
+      this.out.add(m);
+    };
+    const g0 = -elev - SLAB;
+    // 樓下的量體
+    if (elev > 20) box(fr.minX - 9, fr.maxX + 9, g0, -SLAB - 1, fr.minY - 9, fr.maxY + 9);
+    const W = 2400;
+    for (const side of ['front', 'back', 'left', 'right']) {
+      const sd = site.sides[side];
+      if (!sd || sd.type === 'open') continue;
+      const hgt = Math.max(1, sd.floors || 0) * STOREY_H;
+      const dist = sd.type === 'party' ? 0 : Math.max(0.5, sd.dist || 0) * 100;
+      if (side === 'front') box(fr.minX - W, fr.maxX + W, g0, g0 + hgt, fr.maxY + dist + 180, fr.maxY + dist + 1080);
+      else if (side === 'back') box(fr.minX - W, fr.maxX + W, g0, g0 + hgt, fr.minY - dist - 900, fr.minY - dist - 131);
+      else if (side === 'left') box(fr.minX - dist - 900, fr.minX - dist - 10, g0, g0 + hgt, fr.minY, fr.maxY);
+      else box(fr.maxX + dist + 10, fr.maxX + dist + 900, g0, g0 + hgt, fr.minY, fr.maxY);
+    }
+    this.ground.position.y = g0 / 100 - 0.01;
+  }
+
+  // 外觀材質（依外牆、顏色、窗框、欄杆組合快取）
+  facadeMats(f) {
+    const key = JSON.stringify(f);
+    if (this._facade?.key === key) return this._facade.F;
+    if (this._facade) disposeMaterials(this._facade.F);
+    const std = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, ...extra });
+    const fc = FRAMES[f.frame]?.[1] || '#26292d';
+    const F = {
+      wall: std(0xffffff, { map: facadeTex(f.wall, f.color), roughness: f.wall === 'stone' ? 0.5 : 0.92 }),
+      slab: std(new THREE.Color(f.color).multiplyScalar(0.82), { roughness: 0.95 }),
+      frame: std(fc, { metalness: f.frame === 'wood' ? 0 : 0.45, roughness: f.frame === 'wood' ? 0.7 : 0.4 }),
+      frameLine: new THREE.LineBasicMaterial({ color: fc }),
+      glass: new THREE.MeshPhysicalMaterial({ color: 0x8fa6b0, roughness: 0.06, metalness: 0.35, transparent: true, opacity: 0.62, depthWrite: false }),
+      railGlass: new THREE.MeshPhysicalMaterial({ color: 0xd3e6ec, roughness: 0.05, transparent: true, opacity: 0.3, depthWrite: false }),
+      grille: f.grille === 'alu' ? std(0x5a5e63, { metalness: 0.6, roughness: 0.35 }) : std(0xffffff, { map: slatTex(), roughness: 0.7 }),
+      roof: std(f.wall === 'tile' ? 0x7a3b2a : 0x3e4247, { roughness: 0.8 }),
+      tank: std(0xd8dbde, { metalness: 0.35, roughness: 0.4 }),
+      dark: std(0x2b2e33, { roughness: 0.6 }),
+    };
+    this._facade = { key, F };
+    return F;
+  }
+
+  // 屋頂：平屋頂（樓板＋女兒牆＋水塔）、斜屋頂、花架
+  buildRoofTop(p, y, f, F, isRoofPlan) {
+    const g = new THREE.Group();
+    g.position.y = y;
+    this.root.add(g);
+    const enclosed = p.rooms.filter((r) => !['balcony', 'void'].includes(r.kind) && r.pts.length > 2);
+    const bx = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    for (const r of enclosed) for (const q of r.pts) { bx.x0 = Math.min(bx.x0, q.x); bx.x1 = Math.max(bx.x1, q.x); bx.y0 = Math.min(bx.y0, q.y); bx.y1 = Math.max(bx.y1, q.y); }
+    if (!isFinite(bx.x0)) return;
+    const pad = 9;
+    // 樓板
+    for (const r of enclosed) {
+      const sh = new THREE.Shape(r.pts.map((q) => new THREE.Vector2(q.x, q.y)));
+      const geo = new THREE.ExtrudeGeometry(sh, { depth: SLAB + 3, bevelEnabled: false });
+      geo.rotateX(Math.PI / 2);
+      const m = new THREE.Mesh(geo, F.slab);
+      m.position.y = SLAB;
+      m.castShadow = m.receiveShadow = true;
+      g.add(m);
+    }
+    const add = (geo, mat, x, yy, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, yy, z); m.castShadow = m.receiveShadow = true; g.add(m); return m; };
+    if (f.roof === 'pitched') {
+      const w = bx.x1 - bx.x0 + 2 * pad + 40, d = bx.y1 - bx.y0 + 2 * pad + 40;
+      const rise = Math.tan(24 * Math.PI / 180) * w / 2;
+      const geo = gableGeometry(w, d, rise);
+      add(geo, F.roof, (bx.x0 + bx.x1) / 2, SLAB, (bx.y0 + bx.y1) / 2);
+      // 山牆
+      const tri = new THREE.Shape([new THREE.Vector2(-w / 2 + 20, 0), new THREE.Vector2(w / 2 - 20, 0), new THREE.Vector2(0, rise - 8)]);
+      for (const z of [bx.y0 - pad, bx.y1 + pad]) {
+        const tg = new THREE.ExtrudeGeometry(tri, { depth: 12, bevelEnabled: false });
+        worldUV(tg, 0, y + SLAB);
+        add(tg, F.wall, (bx.x0 + bx.x1) / 2, SLAB, z - 6);
+      }
+    } else {
+      // 女兒牆
+      const H = 60;
+      for (const [x0, z0, x1, z1] of [[bx.x0, bx.y0, bx.x1, bx.y0], [bx.x0, bx.y1, bx.x1, bx.y1], [bx.x0, bx.y0, bx.x0, bx.y1], [bx.x1, bx.y0, bx.x1, bx.y1]]) {
+        const L = Math.hypot(x1 - x0, z1 - z0) + 18;
+        const geo = new THREE.BoxGeometry(x0 === x1 ? 15 : L, H, x0 === x1 ? L : 15);
+        worldUV(geo, 0, y + SLAB + H / 2);
+        add(geo, F.wall, (x0 + x1) / 2, SLAB + H / 2, (z0 + z1) / 2);
+      }
+      // 水塔（放在樓梯間上方）
+      const tx = Math.min(bx.x1 - 90, 480), tz = Math.max(bx.y0 + 90, 200);
+      add(new THREE.BoxGeometry(150, 30, 150), F.dark, tx, SLAB + 15, tz);
+      const tank = add(new THREE.CylinderGeometry(58, 58, 130, 28), F.tank, tx, SLAB + 30 + 65, tz);
+      void tank;
+      add(new THREE.CylinderGeometry(60, 52, 14, 28), F.tank, tx, SLAB + 30 + 137, tz);
+      if (f.roof === 'pergola' && isRoofPlan) this.buildPergola(p, y, F);
+    }
+  }
+
+  buildPergola(p, y, F) {
+    const terr = p.rooms.filter((r) => r.kind === 'balcony' && r.pts.length > 2);
+    if (!terr.length) return;
+    let best = null;
+    for (const r of terr) { const a = areaM2(r.pts); if (!best || a > best.a) best = { r, a }; }
+    const xs = best.r.pts.map((q) => q.x), ys = best.r.pts.map((q) => q.y);
+    const x0 = Math.max(Math.min(...xs), 190) + 20, x1 = Math.max(...xs) - 30, z0 = Math.min(...ys) + 30, z1 = Math.min(Math.max(...ys) - 40, z0 + 360);
+    const g = new THREE.Group();
+    g.position.y = y - (p.floorHeight || 350);
+    this.root.add(g);
+    const mat = F.grille;
+    const add = (w, h, d, x, yy, z) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, yy, z); m.castShadow = true; g.add(m); };
+    for (const x of [x0, x1]) for (const z of [z0, z1]) add(10, 250, 10, x, 125, z);
+    for (const z of [z0, z1]) add(x1 - x0 + 30, 12, 8, (x0 + x1) / 2, 254, z);
+    for (let x = x0; x <= x1 + 0.1; x += 30) add(5, 10, z1 - z0 + 40, x, 265, (z0 + z1) / 2);
+  }
+
+  // 正面格柵：沿右側陽台外緣，從二樓到屋頂
+  buildGrille(floors, top, F) {
+    const f2 = floors.find((f) => f.level === 2);
+    if (!f2) return;
+    const y0 = f2.elev - SLAB, y1 = top + 60;
+    const g = new THREE.Group();
+    this.root.add(g);
+    for (let x = 300; x <= 470; x += 12) {
+      const geo = new THREE.BoxGeometry(4, y1 - y0, 9);
+      const m = new THREE.Mesh(geo, F.grille);
+      m.position.set(x, (y0 + y1) / 2, 1722 + 12);
+      m.castShadow = true;
+      g.add(m);
+    }
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(186, 8, 14), F.grille);
+    beam.position.set(385, y1, 1734);
+    g.add(beam);
+  }
+
+  // 周邊：左右鄰房、後巷對面、馬路
+  buildNeighbors(site, F) {
+    const C = { ...this.ctxMats, neighbor: this.ctxMats.neighborLight || (this.ctxMats.neighborLight = new THREE.MeshStandardMaterial({ color: 0xb4b8bc, roughness: 1, transparent: true, opacity: 0.09, depthWrite: false })) };
+    const box = (x0, x1, y0, y1, z0, z1, mat) => {
+      if (x1 - x0 < 1 || y1 - y0 < 1 || z1 - z0 < 1) return;
+      const geo = new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0);
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+      m.receiveShadow = true;
+      m.castShadow = mat !== C.neighbor;
+      m.userData.ctx = true;
+      this.root.add(m);
+      if (mat === C.neighbor) {
+        const e = new THREE.LineSegments(new THREE.EdgesGeometry(geo), C.edge);
+        e.position.copy(m.position);
+        this.root.add(e);
+      }
+    };
+    const W = 2400;
+    for (const side of ['front', 'back', 'left', 'right']) {
+      const sd = site.sides[side];
+      if (!sd || sd.type === 'open') continue;
+      const hgt = Math.max(1, sd.floors || 0) * STOREY_H;
+      const dist = sd.type === 'party' ? 0 : Math.max(0.5, sd.dist || 0) * 100;
+      if (side === 'front') {
+        if (sd.type === 'road') box(-W, 600 + W, -2, 1, 1722 + 120, 1550 + dist, C.road);
+        box(-W, 600 + W, 0, hgt, 1550 + dist, 1550 + dist + 900, C.neighbor);
+      } else if (side === 'back') box(-W, 600 + W, 0, hgt, -dist - 900, -dist, C.neighbor);
+      else if (side === 'left') box(-dist - 1200, -dist - (sd.type === 'party' ? 10 : 0), 0, hgt, 0, 1550, C.neighbor);
+      else box(600 + dist + (sd.type === 'party' ? 10 : 0), 600 + dist + 1200, 0, hgt, 0, 1550, C.neighbor);
+    }
+    void F;
+  }
+
+  // 每層的名稱牌（跟著鏡頭轉）
+  buildFloorTags(shown, focus) {
+    for (const { fl, p } of shown) {
+      const c = document.createElement('canvas');
+      const label = fl.label;
+      const sub = (p.name || '').replace(/^(\dF|頂樓)\s*/, '');
+      c.width = 512; c.height = 128;
+      const g = c.getContext('2d');
+      g.fillStyle = fl.id === focus ? 'rgba(239,200,31,0.95)' : 'rgba(31,35,40,0.82)';
+      const r = 24;
+      g.beginPath(); g.moveTo(r, 4); g.arcTo(508, 4, 508, 124, r); g.arcTo(508, 124, 4, 124, r); g.arcTo(4, 124, 4, 4, r); g.arcTo(4, 4, 508, 4, r); g.fill();
+      g.fillStyle = fl.id === focus ? '#1f2328' : '#fff';
+      g.font = '700 52px "Noto Sans TC", sans-serif';
+      g.textBaseline = 'middle';
+      g.fillText(label, 26, 64);
+      g.font = '500 34px "Noto Sans TC", sans-serif';
+      g.fillText(sub.slice(0, 11), 26 + g.measureText(label).width * 1.55 + 10, 66);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+      sp.scale.set(360, 90, 1);
+      sp.position.set(810, fl.elev + 175, 1660);
+      sp.renderOrder = 5;
+      sp.userData = { floor: fl.id, ownMaterial: true, tag: true };
+      sp.material.userData = {};
+      this.root.add(sp);
+    }
   }
 
   // ---------- 日照模擬：周邊建物、下方樓層、只投影不顯示的天花板與上半段牆 ----------
@@ -216,7 +549,7 @@ export class View3D {
       m.position.set(x, y, z);
       m.castShadow = cast; m.receiveShadow = recv;
       m.userData.ctx = true;
-      this.root.add(m);
+      this.out.add(m);
       return m;
     };
     const box = (x0, x1, y0, y1, z0, z1, mat, opt) => {
@@ -227,7 +560,7 @@ export class View3D {
         const e = new THREE.LineSegments(new THREE.EdgesGeometry(geo), C.edge);
         e.position.copy(m.position);
         e.userData.ctx = true;
-        this.root.add(e);
+        this.out.add(e);
       }
       return m;
     };
@@ -329,27 +662,38 @@ export class View3D {
     else this.updateSun();
   }
 
-  buildWall(plan, w, cut, sunOn = false) {
+  buildWall(plan, w, cut, sunOn = false, bld = null) {
     const M = this.mats;
-    const { L, u } = wallFrame(w);
+    const { L, u, n } = wallFrame(w);
     if (L < 0.5) return;
-    const Hfull = w.h ?? plan.wallHeight;
+    // 整棟模式：外牆做到上一層樓板底，立面才連續；女兒牆依外觀設定做成玻璃或鐵件欄杆
+    let Hfull = w.h ?? plan.wallHeight;
+    if (bld && w.kind === 'ext') Hfull = Math.max(Hfull, (plan.floorHeight || 350) - SLAB);
+    if (bld && w.kind === 'parapet' && bld.rail !== 'solid') return this.buildRail(plan, w, bld);
     const H = Math.min(Hfull, cut ?? Infinity);
     const { extA, extB } = wallExtents(plan, w);
     const ang = Math.atan2(u.y, u.x);
-    const selected = this.app.sel?.type === 'wall' && this.app.sel.id === w.id;
+    const selected = this.app.sel?.type === 'wall' && this.app.sel.id === w.id && !bld;
     const side = selected ? M.wallSel : (w.kind === 'parapet' ? M.parapet : M.wall);
     const mats = [side, side, M.cap, side, side, side];
+    const facade = bld && (w.kind === 'ext' || w.kind === 'parapet') ? bld.F.wall : null;
+    if (facade) {
+      const out = this.outwardSign(plan, w, n);
+      mats[0] = mats[1] = facade;
+      mats[out > 0 ? 4 : 5] = facade;
+      if (w.kind === 'parapet') { mats[2] = facade; mats[out > 0 ? 5 : 4] = facade; }
+    }
     const addBox = (s, e, y0, y1, ghost = false) => {
       if (e - s < 0.3 || y1 - y0 < 0.3) return;
       const g = new THREE.BoxGeometry(e - s, y1 - y0, w.t);
-      const m = new THREE.Mesh(g, ghost ? this.shadowOnly : mats);
       const mid = (s + e) / 2;
+      if (facade && !ghost) worldUV(g, mid, (y0 + y1) / 2 + (bld.elev || 0));
+      const m = new THREE.Mesh(g, ghost ? this.shadowOnly : mats);
       m.position.set(w.a.x + u.x * mid, (y0 + y1) / 2, w.a.y + u.y * mid);
       m.rotation.y = -ang;
       m.castShadow = true; m.receiveShadow = !ghost;
       m.userData = ghost ? { ghost: true } : { kind: 'wall', id: w.id };
-      this.root.add(m);
+      this.out.add(m);
     };
     // 剖切線以上的牆：日照模擬時保留成看不見、但會擋陽光的量體
     const piece = (s, e, y0, y1) => {
@@ -363,11 +707,53 @@ export class View3D {
       const sill = o.sill || 0, top = sill + (o.h || 210);
       piece(s, e, -SLAB, Math.min(sill, Hfull));
       if (top < Hfull) piece(s, e, top, Hfull);
-      if (sill < H) this.buildOpening(plan, o, w, Math.min(top, H), sill, H);
+      if (sill < H) this.buildOpening(plan, o, w, Math.min(top, H), sill, H, bld);
     }
   }
 
-  buildOpening(plan, o, w, top, sill, H) {
+  // 牆的哪一側是室外：往法線方向一點點，看是不是落在室內房間裡
+  outwardSign(plan, w, n) {
+    const m = { x: (w.a.x + w.b.x) / 2, y: (w.a.y + w.b.y) / 2 };
+    const off = (w.t || 12) / 2 + 6;
+    const indoor = (p) => plan.rooms.some((r) => !['balcony', 'void'].includes(r.kind) && r.pts.length > 2 && pointIn(p, r.pts));
+    const a = indoor({ x: m.x + n.x * off, y: m.y + n.y * off }), b = indoor({ x: m.x - n.x * off, y: m.y - n.y * off });
+    if (a && !b) return -1;
+    if (b && !a) return 1;
+    return this.outSide(plan, w, n);
+  }
+
+  // 欄杆：矮牆基座＋玻璃或鐵件直條＋扶手
+  buildRail(plan, w, bld) {
+    const { L, u } = wallFrame(w);
+    const { extA, extB } = wallExtents(plan, w);
+    const ang = Math.atan2(u.y, u.x);
+    const F = bld.F;
+    const box = (s, e, y0, y1, t, mat, off = 0) => {
+      const g = new THREE.BoxGeometry(e - s, y1 - y0, t);
+      if (mat === F.wall) worldUV(g, (s + e) / 2, (y0 + y1) / 2 + (bld.elev || 0));
+      const m = new THREE.Mesh(g, mat);
+      const mid = (s + e) / 2;
+      m.position.set(w.a.x + u.x * mid - u.y * off, (y0 + y1) / 2, w.a.y + u.y * mid + u.x * off);
+      m.rotation.y = -ang;
+      m.castShadow = mat !== F.railGlass; m.receiveShadow = true;
+      m.userData = { kind: 'wall', id: w.id };
+      this.out.add(m);
+      return m;
+    };
+    const s0 = -extA, e0 = L + extB;
+    const H = w.h ?? 110;
+    box(s0, e0, -SLAB, 20, w.t, F.wall);
+    box(s0, e0, H - 5, H, Math.max(5, w.t * 0.6), F.frame);
+    if (bld.rail === 'glass') {
+      box(0, L, 20, H - 5, 1.6, F.railGlass);
+      for (let s = 0; s <= L + 0.1; s += Math.max(60, L / Math.max(1, Math.round(L / 150)))) box(s - 2, s + 2, 20, H - 5, 4, F.frame);
+    } else {
+      const n = Math.max(2, Math.round(L / 12));
+      for (let i = 0; i <= n; i++) { const s = (i / n) * L; box(s - 1, s + 1, 20, H - 5, 2, F.frame); }
+    }
+  }
+
+  buildOpening(plan, o, w, top, sill, H, bld = null) {
     const M = this.mats;
     const e = openingEnds(plan, o);
     if (!e) return;
@@ -380,7 +766,7 @@ export class View3D {
     const place = (m, along, off, y) => {
       m.position.set(w.a.x + u.x * along + n.x * off, y, w.a.y + u.y * along + n.y * off);
       m.rotation.y = -ang;
-      this.root.add(tag(m));
+      this.out.add(tag(m));
     };
     if (o.type === 'door') {
       const hingeAlong = o.hinge === 'b' ? o.pos + o.w / 2 : o.pos - o.w / 2;
@@ -397,7 +783,7 @@ export class View3D {
       const dx = vx * c + n.x * side * s, dy = vy * c + n.y * side * s;
       leaf.position.set(hp.x, sill + hgt / 2, hp.y);
       leaf.rotation.y = -Math.atan2(dy, dx);
-      this.root.add(tag(leaf));
+      this.out.add(tag(leaf));
       // 門框
       const fr = new THREE.BoxGeometry(o.w, 4, w.t + 1);
       const fm = new THREE.Mesh(fr, M.frame);
@@ -436,6 +822,20 @@ export class View3D {
         place(p, o.pos + k * o.w / 4, -(w.t / 2 - 2) * 0, sill + hgt / 2);
       }
     }
+    // 鐵捲門：外側上方的捲箱與兩側導軌
+    if (o.shutter && (w.kind === 'ext' || bld)) {
+      const sgn = this.outwardSign(plan, w, n);
+      const off = sgn * (w.t / 2 + 14);
+      const boxM = new THREE.Mesh(new THREE.BoxGeometry(o.w + 16, 30, 28), M.metal || M.alu);
+      place(boxM, o.pos, off, Math.min(top + 15, H - 1));
+      for (const k of [-1, 1]) place(new THREE.Mesh(new THREE.BoxGeometry(5, hgt, 8), M.alu), o.pos + k * (o.w / 2 + 3), off * 0.6, sill + hgt / 2);
+    }
+    // 整棟外觀：窗戶上方雨遮
+    if (bld?.awning && w.kind === 'ext' && o.type === 'window' && !o.shade) {
+      const sgn = this.outwardSign(plan, w, n);
+      const aw = new THREE.Mesh(new THREE.BoxGeometry(o.w + 30, 5, 48), bld.F.frame);
+      place(aw, o.pos, sgn * (w.t / 2 + 24), Math.min(top + 12, H - 3));
+    }
   }
 
   // 外牆的室外側：+1 表示法線 n 方向是室外
@@ -473,7 +873,7 @@ export class View3D {
     const camUp = new THREE.Vector3().crossVectors(f, right).normalize();
     let need = 0;
     for (const sx of [-1, 1]) for (const sy of [0, 1]) for (const sz of [-1, 1]) {
-      const p = new THREE.Vector3(sx * w / 2, sy * h, sz * d / 2);
+      const p = new THREE.Vector3(sx * w / 2, sy * h - (this.bstate ? this.targetY || 0 : 0), sz * d / 2);
       const x = Math.abs(p.dot(right)), y = Math.abs(p.dot(camUp)), z = p.dot(f);
       need = Math.max(need, x / Math.tan(hf / 2) + z, y / Math.tan(vf / 2) + z);
     }
@@ -519,8 +919,9 @@ export class View3D {
       this.camera.position.set(start.x, 1.6, start.z);
       this.controls.target.set(start.x, 1.6, start.z - 0.015);
     } else {
-      const dir = kind === 'top' ? new THREE.Vector3(0, 1, 0.0015) : kind === 'front' ? new THREE.Vector3(0.18, 0.42, 1) : new THREE.Vector3(0.8, 1.15, 0.95);
-      const target = new THREE.Vector3(c.x, kind === 'front' ? 1.0 : 0.6, c.z);
+      const bm = !!this.bstate;
+      const dir = kind === 'top' ? new THREE.Vector3(0, 1, 0.0015) : kind === 'front' ? (bm ? new THREE.Vector3(0.07, 0.22, 1) : new THREE.Vector3(0.18, 0.42, 1)) : (bm ? new THREE.Vector3(0.75, 0.8, 1) : new THREE.Vector3(0.8, 1.15, 0.95));
+      const target = new THREE.Vector3(c.x, this.bstate && this.targetY ? this.targetY : kind === 'front' ? 1.0 : 0.6, c.z);
       const D = this.fitDistance(dir);
       this.camera.position.copy(target).addScaledVector(dir.normalize(), D);
       this.controls.target.copy(target);
@@ -595,8 +996,24 @@ export class View3D {
       const p = new THREE.Vector3();
       return ray.ray.intersectPlane(plane, p) ? { x: p.x * 100, y: p.z * 100 } : null;
     };
+    const pickFloor = (e) => {
+      const r = el.getBoundingClientRect();
+      ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, this.camera);
+      for (const h of ray.intersectObjects(this.root.children, true)) {
+        if (h.object.userData.ctx) continue;
+        if (h.object.userData.floor) return h.object.userData.floor;
+      }
+      return null;
+    };
+    el.addEventListener('dblclick', (e) => {
+      if (!this.app.bmode) return;
+      const f = pickFloor(e);
+      if (f) this.app.openFloor(f);
+    });
     el.addEventListener('pointerdown', (e) => {
       this.downAt = { x: e.clientX, y: e.clientY };
+      if (this.app.bmode) return;
       if (this.mode === 'walk' || e.button !== 0) return;
       const h = pick(e);
       if (h?.type === 'item') {
@@ -632,6 +1049,7 @@ export class View3D {
         return;
       }
       if (!this.downAt || Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y) > 4 || this.mode === 'walk') return;
+      if (this.app.bmode) { this.app.focusFloor(pickFloor(e)); return; }
       const h = pick(e);
       if (h && h.type !== 'room') this.app.setSel({ type: h.type, id: h.id });
       else if (h?.type === 'room') this.app.setSel({ type: 'room', id: h.id });
@@ -654,6 +1072,99 @@ export class View3D {
     const clone = this.root.clone(true);
     return new Promise((res, rej) => exp.parse(clone, (r) => res(r), rej, { binary: true }));
   }
+}
+
+// 方塊的 UV 換成世界尺寸（1 單位＝1 公尺），外牆材質跨牆段、跨樓層才會連續
+function worldUV(g, along0, y0) {
+  const pos = g.attributes.position, nor = g.attributes.normal, uv = g.attributes.uv;
+  if (!uv || !nor) return;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const nx = Math.abs(nor.getX(i)), ny = Math.abs(nor.getY(i));
+    let u, v;
+    if (ny > 0.5) { u = x + along0; v = z; } else if (nx > 0.5) { u = z; v = y + y0; } else { u = x + along0; v = y + y0; }
+    uv.setXY(i, u / 100, v / 100);
+  }
+  uv.needsUpdate = true;
+}
+
+// 斜屋頂（脊線沿深度方向）
+function gableGeometry(w, d, rise) {
+  const hw = w / 2, hd = d / 2;
+  const P = [[-hw, 0, -hd], [0, rise, -hd], [0, rise, hd], [-hw, 0, hd], [hw, 0, -hd], [hw, 0, hd]];
+  const tris = [[0, 1, 2], [0, 2, 3], [4, 5, 2], [4, 2, 1], [0, 3, 5], [0, 5, 4]];
+  const pos = [], uvs = [];
+  for (const t of tris) for (const k of t) { pos.push(...P[k]); uvs.push(P[k][0] / 100, P[k][2] / 100); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.computeVertexNormals();
+  return g;
+}
+
+// 外牆材質貼圖：每張代表 tw×th 公分
+function facadeTex(kind, color) {
+  const mk = (tw, th, draw, size = 256) => {
+    const c = document.createElement('canvas');
+    c.width = size; c.height = Math.round(size * th / tw);
+    draw(c.getContext('2d'), c.width, c.height);
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(100 / tw, 100 / th);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    return t;
+  };
+  let seed = 3;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const shade = (hex, k) => { const c = new THREE.Color(hex); c.offsetHSL(0, 0, k); return '#' + c.getHexString(); };
+  if (kind === 'tile') return mk(120, 70, (g, W, H) => {
+    // 二丁掛：22.7×6 cm 磚、1 cm 灰縫、半磚錯縫
+    g.fillStyle = '#d9d2c4'; g.fillRect(0, 0, W, H);
+    const rows = 10, bw = W / 5, rh = H / rows;
+    for (let r = 0; r < rows; r++) for (let i = -1; i < 6; i++) {
+      const x = i * bw + (r % 2 ? bw / 2 : 0);
+      g.fillStyle = shade(color, (rnd() - 0.5) * 0.08);
+      g.fillRect(x + 2, r * rh + 2, bw - 4, rh - 4);
+    }
+  });
+  if (kind === 'stone') return mk(120, 120, (g, W, H) => {
+    g.fillStyle = '#9d968b'; g.fillRect(0, 0, W, H);
+    for (const [x, y, w, h] of [[0, 0, W / 2, H], [W / 2, 0, W / 2, H / 2], [W / 2, H / 2, W / 2, H / 2]]) {
+      g.fillStyle = shade(color, (rnd() - 0.5) * 0.06);
+      g.fillRect(x + 1, y + 1, w - 2, h - 2);
+      g.strokeStyle = 'rgba(120,110,95,0.18)'; g.lineWidth = 1;
+      for (let k = 0; k < 3; k++) { g.beginPath(); let xx = x + rnd() * w, yy = y; g.moveTo(xx, yy); while (yy < y + h) { xx += (rnd() - 0.5) * 18; yy += 12; g.lineTo(xx, yy); } g.stroke(); }
+    }
+  });
+  if (kind === 'concrete') return mk(180, 90, (g, W, H) => {
+    g.fillStyle = color; g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 3000; i++) { const v = rnd() < 0.5 ? 0 : 255; g.fillStyle = `rgba(${v},${v},${v},${0.03 + rnd() * 0.05})`; g.fillRect(rnd() * W, rnd() * H, 1 + rnd() * 2, 1 + rnd() * 2); }
+    g.strokeStyle = 'rgba(0,0,0,0.18)'; g.lineWidth = 1.2; g.strokeRect(0.5, 0.5, W - 1, H - 1);
+    g.fillStyle = 'rgba(0,0,0,0.35)';
+    for (const fx of [1 / 6, 1 / 2, 5 / 6]) for (const fy of [1 / 4, 3 / 4]) { g.beginPath(); g.arc(fx * W, fy * H, 2.6, 0, Math.PI * 2); g.fill(); }
+  });
+  if (kind === 'terrazzo') return mk(60, 60, (g, W, H) => {
+    g.fillStyle = color; g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 1400; i++) { const k = rnd(); g.fillStyle = k < 0.33 ? 'rgba(60,58,54,0.55)' : k < 0.66 ? 'rgba(250,248,242,0.7)' : 'rgba(150,120,90,0.45)'; g.beginPath(); g.arc(rnd() * W, rnd() * H, 0.8 + rnd() * 1.8, 0, Math.PI * 2); g.fill(); }
+  });
+  return mk(200, 200, (g, W, H) => {
+    g.fillStyle = color; g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 900; i++) { const v = rnd() < 0.5 ? 0 : 255; g.fillStyle = `rgba(${v},${v},${v},${0.015 + rnd() * 0.02})`; g.fillRect(rnd() * W, rnd() * H, 2, 2); }
+  }, 128);
+}
+
+function slatTex() {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#9a6e45'; g.fillRect(0, 0, 64, 256);
+  g.strokeStyle = 'rgba(60,35,15,0.35)';
+  for (let i = 0; i < 9; i++) { g.beginPath(); g.moveTo(4 + i * 7, 0); g.bezierCurveTo(10 + i * 7, 80, i * 7, 170, 6 + i * 7, 256); g.stroke(); }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
 }
 
 // ---------- 材質 ----------
