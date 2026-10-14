@@ -4,7 +4,7 @@
 import { clone, normalizePlan, polygonArea, DEFAULTS, m2ToPing, openingEnds } from './model.js';
 import { builder, core, DUCTS, DUCT_RECTS, builtinPlans } from './plans.js';
 import { RoomLayout, furnish } from './layout.js';
-import { designWindows } from './site.js';
+import { designWindows, roofLevel } from './site.js';
 
 // ---------- 用途與選項 ----------
 export const USES = {
@@ -703,6 +703,33 @@ function hasDoor(p, r) {
       return Math.hypot(e.c.x - q.x - dx * t, e.c.y - q.y - dy * t) < 2;
     });
   });
+}
+
+// 頂樓平面 → 天井四面牆頂、樓梯間（屋突）頂的高度（cm，離地）。沒有頂樓時樓梯間只到屋頂樓板。
+export function shaftHeights(rf, site) {
+  const out = {};
+  if (!rf) { out.stairTop = roofLevel(site) + 20; return out; }
+  const lw = rf.rooms.find((r) => r.kind === 'void');
+  if (lw) {
+    const xs = lw.pts.map((q) => q.x), ys = lw.pts.map((q) => q.y);
+    const R = { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+    const edges = { x0: ['x', R.x0, R.y0, R.y1], x1: ['x', R.x1, R.y0, R.y1], y0: ['y', R.y0, R.x0, R.x1], y1: ['y', R.y1, R.x0, R.x1] };
+    out.lwTops = {};
+    for (const [k, [ax, c, a, b]] of Object.entries(edges)) {
+      const along = ax === 'x' ? 'y' : 'x';
+      let top = 0;
+      for (const w of rf.walls) {
+        if (Math.abs(w.a[ax] - c) > 3 || Math.abs(w.b[ax] - c) > 3) continue;
+        const lo = Math.max(Math.min(w.a[along], w.b[along]), a), hi = Math.min(Math.max(w.a[along], w.b[along]), b);
+        if (hi - lo < (b - a) * 0.5) continue;
+        const h = w.kind === 'parapet' ? (w.h || DEFAULTS.parapet) : (w.h || rf.wallHeight || 300) + 15;
+        top = Math.max(top, (rf.elevation || 0) + h);
+      }
+      if (top) out.lwTops[k] = top;
+    }
+  }
+  if (rf.rooms.some((r) => r.kind === 'stair')) out.stairTop = (rf.elevation || 0) + (rf.wallHeight || 300) + 15;
+  return out;
 }
 
 // 這層的摘要（給整棟清單用）

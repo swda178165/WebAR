@@ -6,6 +6,8 @@ import { STYLES, FURN_VARIANTS } from './styles.js';
 import { generate, defaultProgram } from './generator.js';
 import { FACADES, USES, ENTRY, HALL, RENT, ROOF_ROOM, FACADE_WALLS, FACADE_COLORS, FRAMES, RAILS, ROOFS, GRILLES } from './building.js';
 import { parse, normalize, matchRoom, ACTION_DOC } from './commands.js';
+import { ventOf, DOOR_MODES, WINDOW_TYPES, SEASONS, fmtAch } from './vent.js';
+import { LW_TOPS, LW_WALLS, dirName } from './site.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -230,6 +232,7 @@ ${ACTION_DOC}
     const ok = (html, undo = true) => ({ ok: true, html, undo });
     switch (a.type) {
       case 'say': return { html: esc(a.text) };
+      case 'vent': return this.askVent(a.set || {});
       case 'undo': this.undo(); return { html: '好，回到上一步。' };
       case 'view': return this.askView(String(a.what || ''));
       case 'floorUse': {
@@ -246,7 +249,7 @@ ${ACTION_DOC}
         const set = { ...(a.set || {}) };
         for (const [k, d] of Object.entries(a.inc || {})) set[k] = (k.split('.').reduce((o, x) => o?.[x], b) || 0) + d;
         let extra = '';
-        if ('rent.rooms' in set) { const n = +set['rent.rooms']; if (n > 3) extra = `這一層能開窗的地方只有後面一間、前面兩間，最多 3 間有窗的套房，所以先排 3 間。`; set['rent.rooms'] = n <= 2 ? 2 : 3; }
+        if ('rent.rooms' in set) { const n = +set['rent.rooms']; if (n > 3) extra = `能開對外窗的只有後面一間、前面兩間；中間的天井淨寬約 1.6 m、四周三四層樓高，低樓層的房間只靠它採光不夠當臥室（第 42 條 D/H 要 ≥ 1/4），所以先排 3 間。`; set['rent.rooms'] = n <= 2 ? 2 : 3; }
         if ('shop.scooters' in set) { const max = (set['shop.entry'] || b.shop.entry) === 'side' ? 4 : 7; if (set['shop.scooters'] > max) extra = `${(set['shop.entry'] || b.shop.entry) === 'side' ? '側邊通道' : '一樓後段'}最多停 ${max} 台。`; set['shop.scooters'] = Math.max(0, Math.min(max, +set['shop.scooters'])); }
         if ('n' in set) set.n = Math.max(1, Math.min(5, +set.n));
         const keys = Object.keys(set);
@@ -367,9 +370,49 @@ ${ACTION_DOC}
     if (['walk', 'iso', 'front', 'top'].includes(w)) { mobile3d(); document.querySelector(`#viewSeg [data-view="${w}"]`)?.click(); return { html: { walk: '走進去看：拖曳看四周，用畫面上的箭頭走動。', iso: '鳥瞰。', front: '從正面看。', top: '從上面看。' }[w] }; }
     if (w === 'sun') { if (this.bmode) return { html: '日照要在單層平面看：先打開一層，再說「看日照」。' }; mobile3d(); this.setSun(true); return { html: '開啟日照：下面可以選月份和時間。' }; }
     if (w === 'daylight') { if (this.bmode) return { html: '採光要在單層平面看：先打開一層。' }; this.setDaylight(true); return { html: '平面圖上顯示各處亮度，越黃越亮。' }; }
+    if (w === 'vent') {
+      if (this.bmode) { this.setSideTab('vent'); this.scheduleVent(true); return { html: '右側「通風」是整棟的剖面：各層換氣次數、天井和樓梯間往上拔風。點一層可以看每個房間。' }; }
+      this.setVent(true); this.setSideTab('vent');
+      return { html: '平面上顯示風的路徑：藍色箭頭是風進來、橘色是出去，房間顏色越深越通風。右側「通風」有每個房間的換氣次數和建議。' };
+    }
     if (w === 'render') { this.openRender?.(); return { html: '開始做效果圖。' }; }
     if (w === 'pano') { this.openPano?.(); return { html: '開始做 360° 環景。' }; }
     return null;
+  },
+
+  // ---------- 通風設定 ----------
+  askVent(set) {
+    const st = this.site;
+    const v = ventOf(st);
+    const said = [];
+    for (const [k, val] of Object.entries(set)) {
+      if (k === 'lwTop' && LW_TOPS[val]) { st.lw = { ...(st.lw || {}), top: val }; said.push(`天井頂改成「${LW_TOPS[val].name}」`); }
+      else if (k === 'lwWall' && LW_WALLS[val]) { st.lw = { ...(st.lw || {}), wall: val }; said.push(`天井牆面改成「${LW_WALLS[val].name}」`); }
+      else if (k === 'doors' && DOOR_MODES[val]) { v.doors = val; said.push(DOOR_MODES[val]); }
+      else if (k === 'window' && WINDOW_TYPES[val]) { v.window = val; said.push(`窗戶用${WINDOW_TYPES[val].name}`); }
+      else if (k === 'season' && SEASONS[val]) { v.season = val; said.push(`看${SEASONS[val]}`); }
+      else if (k === 'wind') { v.wind = val == null ? null : ((+val % 360) + 360) % 360; said.push(val == null ? '風向用城市常見的' : `風從${dirName(v.wind)}邊吹來`); }
+      else if (k === 'speed' && Number.isFinite(+val)) { v.speed = Math.max(0, Math.min(12, +val)); said.push(`風速 ${v.speed} m/s`); }
+      else if (['erv', 'stairVent', 'bathFan', 'screen'].includes(k)) {
+        v[k] = !!val;
+        said.push({ erv: val ? '裝全熱交換器' : '不裝全熱交換器', stairVent: val ? '樓梯間頂端加高窗／排風' : '樓梯間頂端不開', bathFan: val ? '無窗浴室裝排風機' : '浴室不裝排風機', screen: val ? '有紗窗' : '沒有紗窗' }[k]);
+      }
+    }
+    if (!said.length) return null;
+    st.vent = v;
+    this.save();
+    this.scheduleDaylight?.();
+    if (this.bmode) this.setSideTab('vent'); else { this.setVent(true); this.setSideTab('vent'); }
+    this.scheduleVent(true);
+    let sum = '';
+    if (!this.bmode) {
+      const r = this.vent.result;
+      if (r) {
+        const hab = r.rooms.filter((x) => ['living', 'bedroom', 'kitchen'].includes(x.kind));
+        sum = ` 這一層居室平均每小時換氣 ${fmtAch(r.avgAch)} 次，有穿堂風的 ${hab.filter((x) => x.type === 'cross').length}/${hab.length} 間。`;
+      }
+    }
+    return { ok: true, html: `${esc(said.join('、'))}。${sum}`, undo: false };
   },
 
   // ---------- 格局重排 ----------

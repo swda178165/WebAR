@@ -134,12 +134,17 @@ export class View3D {
     if (this.paused) return; // 擬真渲染時暫停即時畫面，把顯示卡讓給光線追蹤
     if (this.pending && !this.drag3d) { this.pending = false; this.rebuild(); }
     if (this.mode === 'walk') this.walkStep();
+    if (this.ventAnim?.length) {
+      const t = performance.now() / 1000;
+      for (const a of this.ventAnim) a.obj.position.copy(a.base).addScaledVector(a.dir, (((t * 0.6 + a.phase) % 1) - 0.5) * 50);
+    }
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   }
 
   // ---------- 建模 ----------
   clearRoot() {
+    this.ventAnim = [];
     for (const l of this.scene.children.filter((o) => o.userData.renderLight)) this.scene.remove(l);
     this.root.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
@@ -172,6 +177,7 @@ export class View3D {
     this.buildPlanBody(plan, { cut, sunOn, labels: this.showLabels && !rm });
     if (sunOn) this.buildContext(plan, cut);
     if (rm?.interior) { this.buildCeilings(plan, rm); this.buildRenderContext(plan); }
+    if (!rm) this.buildVentArrows(plan);
     if (!rm) this.updateSelection();
     this.fitShadows(plan);
     this.updateSun();
@@ -236,6 +242,51 @@ export class View3D {
         this.out.add(lab);
       }
     }
+  }
+
+  // 通風模擬開著時：門窗上的風向箭頭（藍進、橘出），天井、樓梯間往上的箭頭；箭頭會沿風向漂動
+  buildVentArrows(plan) {
+    const vs = this.app.vent;
+    if (!vs?.show || !vs.result || vs.planId !== plan.id) return;
+    const r = vs.result;
+    const g = new THREE.Group();
+    const mk = (color) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false });
+    const mats = { in: mk(0x1f6fb2), out: mk(0xd9822b), mid: mk(0x6c9cc4) };
+    const UP = new THREE.Vector3(0, 1, 0);
+    const arrow = (len, rad, mat) => {
+      const a = new THREE.Group();
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(rad, rad, len * 0.62, 10), mat);
+      shaft.position.y = len * 0.31;
+      const head = new THREE.Mesh(new THREE.ConeGeometry(rad * 2.4, len * 0.38, 14), mat);
+      head.position.y = len * 0.81;
+      a.add(shaft, head);
+      return a;
+    };
+    for (const ed of r.edges) {
+      if (!ed.at || ed.kind === 'leak') continue;
+      const q = Math.abs(ed.Q) * 3600;
+      if (q < 15) continue;
+      const len = Math.max(45, Math.min(130, 30 * Math.log2(1 + q / 15)));
+      const rad = Math.max(3, Math.min(9, len * 0.06));
+      let d, cls, y;
+      if (ed.kind === 'top') {
+        if (ed.Q <= 0) continue;
+        d = UP.clone(); cls = 'out'; y = (plan.wallHeight || 300) * 0.45;
+      } else {
+        if (!ed.dir) continue;
+        const s = ed.Q >= 0 ? 1 : -1;
+        d = new THREE.Vector3(ed.dir.x * s, 0, ed.dir.y * s).normalize();
+        cls = ed.kind === 'win' ? (ed.Q < 0 ? 'in' : 'out') : 'mid';
+        y = ed.z * 100 - (r.elev || 0);
+      }
+      const a = arrow(len, rad, mats[cls]);
+      a.quaternion.setFromUnitVectors(UP, d);
+      a.position.set(ed.at.x - d.x * len / 2, ed.kind === 'top' ? y : y - d.y * len / 2, ed.at.y - d.z * len / 2);
+      g.add(a);
+      this.ventAnim.push({ obj: a, base: a.position.clone(), dir: d, phase: Math.random() });
+    }
+    g.traverse((o) => { if (o.isMesh) { o.userData.ownMaterial = true; o.renderOrder = 5; } });
+    this.root.add(g);
   }
 
   // ---------- 整棟外觀 ----------

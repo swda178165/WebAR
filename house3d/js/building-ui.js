@@ -3,9 +3,10 @@
 import { clone, normalizePlan, polygonCentroid } from './model.js';
 import { STYLES } from './styles.js';
 import { SIDE_TYPES } from './site.js';
+import { analyzeVent, legalShort } from './vent.js';
 import {
   USES, ENTRY, HALL, RENT, ROOF_ROOM, FACADES, FACADE_WALLS, FACADE_COLORS, FRAMES, RAILS, ROOFS, GRILLES,
-  defaultBuilding, normalizeBuilding, floorList, useOf, usesFor, makeFloorPlan, buildingChecks, floorSummary, homeSources,
+  defaultBuilding, normalizeBuilding, floorList, useOf, usesFor, makeFloorPlan, buildingChecks, floorSummary, homeSources, shaftHeights,
 } from './building.js';
 
 const $ = (s) => document.querySelector(s);
@@ -96,6 +97,15 @@ export const BuildingUI = {
       }
     }
     if (!this.project.plans.some((p) => p.id === this.project.active)) this.project.active = this.project.plans[0]?.id;
+    this.deriveShafts();
+  },
+
+  // 天井四周、樓梯間在頂樓的高度（採光與通風用）：頂樓的房間、浴室貼著天井那一面會擋到更高
+  deriveShafts() {
+    const st = this.site;
+    if (!this.building) { delete st.derived; return; }
+    const rf = this.floors().find((f) => f.roof);
+    st.derived = shaftHeights(rf && this.floorPlan(rf), st);
   },
 
   regenFloor(fl) {
@@ -140,6 +150,7 @@ export const BuildingUI = {
     this.renderTabs();
     this.renderBuilding();
     this.view.invalidate();
+    this.scheduleVent?.();
   },
   bRestore(s) {
     const d = JSON.parse(s);
@@ -205,6 +216,7 @@ export const BuildingUI = {
     this.renderTabs();
     this.renderBuilding();
     if (!on) this.renderProps();
+    if (this.sideTab === 'vent') this.scheduleVent?.(true);
   },
 
   focusFloor(id) {
@@ -306,7 +318,7 @@ export const BuildingUI = {
     }
     if (has('rent')) {
       h += `<div class="sec"><h3>出租</h3>${row('間數', seg('rent.rooms', Object.entries(RENT).map(([k, v]) => [k, v.name]), b.rent.rooms))}
-        <p class="note">${esc(RENT[b.rent.rooms]?.desc || '')}。這一層能開窗的地方只有後面一間、前面兩間，所以最多 3 間有窗的套房。</p>
+        <p class="note">${esc(RENT[b.rent.rooms]?.desc || '')}。能開對外窗的是後面一間、前面兩間；中間的天井淨寬只有約 1.6 × 2 m、四周牆有三、四層樓高，低樓層靠它採光不夠當臥室，所以用來給走廊和浴室採光、通風（右側「通風」可以看風怎麼走）。</p>
         ${row('風格', styleSel('rent.style', b.rent.style))}</div>`;
     }
     if (has('home')) {
@@ -333,6 +345,18 @@ export const BuildingUI = {
         <div class="checks"><label><input type="checkbox" data-bchk="facade.awning"${f.awning ? ' checked' : ''}> 窗戶加雨遮</label></div>
       </details></div>`;
     const checks = buildingChecks(b, floors, (fl) => this.floorPlan(fl), this.site);
+    // 通風（第 43 條）：各層通風面積不足的空間
+    try {
+      const short = [];
+      for (const fl of floors) {
+        const p = this.floorPlan(fl);
+        if (!p) continue;
+        const r = analyzeVent(p, this.site);
+        const n = legalShort(r.rooms, r.v);
+        if (n) short.push(`${fl.label} ${[...new Set(r.rooms.filter((x) => x.legal && !x.legal.ok && !(x.kind === 'bath' && r.v.bathFan)).map((x) => x.name))].join('、')}`);
+      }
+      checks.push({ lvl: short.length ? 'warn' : 'ok', t: '通風面積（第 43 條）', d: short.length ? `${short.join('；')}：可開窗面積不到樓地板 5%（廚房 1/10），要加大窗戶或裝機械通風（排風機、排油煙機）。右側「通風」分頁有每一層風怎麼走。` : '每個居室、浴廁都有足夠的可開窗面積，或有排風機補足。右側「通風」分頁可以看風怎麼走。' });
+    } catch (e) { console.warn(e); }
     h += `<div class="sec"><h3>法規提醒</h3><div class="dl-table">${checks.map((c) => `<div class="dl-row chk-${c.lvl}"><b>${c.lvl === 'ok' ? '✅' : '⚠️'} ${esc(c.t)}</b><span></span><div class="meta">${esc(c.d)}</div></div>`).join('')}</div>
       <p class="note">這是規劃階段的提醒，實際要以建築師和當地建管單位的審查為準。</p></div>`;
     el.innerHTML = h;

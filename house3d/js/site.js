@@ -37,6 +37,7 @@ export function defaultSite() {
       left: { type: 'party', dist: 0, floors: 5 },
       right: { type: 'party', dist: 0, floors: 5 },
     },
+    lw: { top: 'open', wall: 'normal' },
   };
 }
 
@@ -45,8 +46,19 @@ export function normalizeSite(s) {
   if (!s) return d;
   const out = { ...d, ...s, sides: { ...d.sides } };
   for (const k of Object.keys(d.sides)) out.sides[k] = { ...d.sides[k], ...(s.sides?.[k] || {}) };
+  out.lw = { ...LW_DEFAULT, ...(s.lw || {}) };
   return out;
 }
+
+// 天井：頂部做法（影響採光與拔風）、四周牆面顏色
+export const LW_DEFAULT = { top: 'open', wall: 'normal' };
+export const LW_TOPS = {
+  open: { name: '開放（不加蓋）', sky: 1, vent: 1 },
+  louver: { name: '透光頂蓋＋側邊百葉', sky: 0.75, vent: 0.45 },
+  sealed: { name: '採光罩整個封住', sky: 0.75, vent: 0.01 },
+};
+export const LW_WALLS = { normal: { name: '一般外牆', refl: 0.18 }, light: { name: '刷白／淺色磁磚', refl: 0.32 } };
+const lwOf = (site) => ({ ...LW_DEFAULT, ...(site.lw || {}) });
 
 export const latOf = (site) => (CITIES[site.city]?.[1] ?? site.lat ?? 25);
 export const roofLevel = (site) => site.groundH + (site.floors - 1) * site.floorH; // 屋頂樓板
@@ -122,6 +134,29 @@ function voidOf(w, voids) {
   return null;
 }
 
+// 天井四面牆的頂端高度（離地 cm）：自己的屋頂（含女兒牆）；貼著共同壁的那一面是鄰房外牆，鄰房比較高就以鄰房為準；
+// 整棟規劃時，頂樓房間、浴室貼著天井的那一面會再高一層（site.derived.lwTops，由 building-ui 依頂樓平面算好）。
+export function voidTops(plan, site, fr, rect, top = buildingTop(site)) {
+  const t = { x0: top, x1: top, y0: top, y1: top };
+  for (const [edge, side, c, lim] of [['x0', 'left', rect.x0, fr.minX], ['x1', 'right', rect.x1, fr.maxX], ['y0', 'back', rect.y0, fr.minY], ['y1', 'front', rect.y1, fr.maxY]]) {
+    if (Math.abs(c - lim) > 6) continue;
+    const s = site.sides?.[side];
+    if (s && (s.type === 'party' || (s.type === 'building' && (s.dist || 0) < 1))) t[edge] = Math.max(t[edge], (s.floors || 0) * STOREY_H);
+  }
+  const d = plan.floor && site.derived?.lwTops;
+  if (d) for (const k of Object.keys(t)) if (d[k]) t[k] = Math.max(t[k], d[k]);
+  return t;
+}
+
+// 天井一扇窗依建築技術規則第 42 條檢討：D＝到對面牆的水平淨距、H＝窗中心到對面牆頂的高度，D/H ≥ 1/4（住宅區）才算有效採光
+export function voidDH(w) {
+  const alongX = Math.abs(w.n.x) > 0.5;
+  const D = (alongX ? w.void.x1 - w.void.x0 : w.void.y1 - w.void.y0) - 15;
+  const facing = alongX ? (w.n.x > 0 ? 'x1' : 'x0') : (w.n.y > 0 ? 'y1' : 'y0');
+  const H = (w.voidTops?.[facing] ?? w.voidTop) - w.zc;
+  return { D, H, ratio: H > 0 ? D / H : Infinity, facing };
+}
+
 // 陽台（樓上的陽台板＝雨遮；本層陽台的女兒牆＝近處遮擋）
 function balconyBands(plan, fr) {
   const bands = { front: [], back: [], left: [], right: [] };
@@ -139,9 +174,12 @@ function balconyBands(plan, fr) {
 // 建立模擬環境
 export function makeEnv(plan, site) {
   const fr = planFrame(plan);
-  const voids = plan.rooms.filter((r) => r.kind === 'void' && r.pts.length >= 3).map((r) => ({ room: r, rect: rectOf(r.pts) }));
   const elev = plan.elevation || 0;
   const top = buildingTop(site);
+  const voids = plan.rooms.filter((r) => r.kind === 'void' && r.pts.length >= 3).map((r) => {
+    const rect = rectOf(r.pts);
+    return { room: r, rect, tops: voidTops(plan, site, fr, rect, top) };
+  });
   const hasAbove = elev + (plan.floorHeight || 350) < roofLevel(site) - 1;
   const bands = balconyBands(plan, fr);
   const sideInfo = (name) => {
@@ -204,11 +242,17 @@ export function openingInfo(env, o) {
       if (env.hasAbove) info.overhang = { depth: band.depth, z: env.elev + (env.plan.floorHeight || 350) - 15 };
     }
   } else {
+    const lw = lwOf(env.site);
     info.void = vd.void.rect;
-    info.voidTop = env.top;
+    info.voidTops = vd.void.tops;
+    info.voidTop = Math.max(...Object.values(vd.void.tops));
+    info.skyKey = (LW_TOPS[lw.top] || LW_TOPS.open).sky < 1 ? 'skyc' : 'sky';
+    info.wallKey = lw.wall === 'light' ? 'wallL' : 'wall';
   }
   return info;
 }
+
+const isSky = (k) => k === 'sky' || k === 'skyc';
 
 // 從窗外表面一點 Q 往方向 d 看出去：'sky' 看到天空、'obs' 看到對面建物、'wall' 天井牆、'block' 被擋住
 export function trace(info, Q, d) {
@@ -220,11 +264,13 @@ export function trace(info, Q, d) {
   if (info.kind === 'void') {
     const r = info.void;
     const dx = d.x / h, dy = d.y / h;
-    let t = Infinity;
-    if (dx > 1e-6) t = Math.min(t, (r.x1 - Q.x) / dx); else if (dx < -1e-6) t = Math.min(t, (r.x0 - Q.x) / dx);
-    if (dy > 1e-6) t = Math.min(t, (r.y1 - Q.y) / dy); else if (dy < -1e-6) t = Math.min(t, (r.y0 - Q.y) / dy);
+    let t = Infinity, edge = null;
+    const hit = (tt, e) => { if (tt < t) { t = tt; edge = e; } };
+    if (dx > 1e-6) hit((r.x1 - Q.x) / dx, 'x1'); else if (dx < -1e-6) hit((r.x0 - Q.x) / dx, 'x0');
+    if (dy > 1e-6) hit((r.y1 - Q.y) / dy, 'y1'); else if (dy < -1e-6) hit((r.y0 - Q.y) / dy, 'y0');
     if (!(t > 0)) t = 0;
-    return Q.z + tanG * t >= info.voidTop ? 'sky' : 'wall';
+    const topZ = (edge && info.voidTops?.[edge]) ?? info.voidTop;
+    return Q.z + tanG * t >= topZ ? (info.skyKey || 'sky') : (info.wallKey || 'wall');
   }
   if (info.party) return 'block';
   if (info.overhang && d.z > 0) {
@@ -236,7 +282,7 @@ export function trace(info, Q, d) {
   return 'sky';
 }
 
-const LUM = { sky: 1, obs: 0.12, wall: 0.18, block: 0 };
+const LUM = { sky: 1, skyc: LW_TOPS.louver.sky, obs: 0.12, wall: LW_WALLS.normal.refl, wallL: LW_WALLS.light.refl, block: 0 };
 const skyL = (sinG) => (1 + 2 * sinG) / 3;
 const E_OUT = (7 * Math.PI) / 9;
 
@@ -264,7 +310,7 @@ export function skyAngle(info) {
   const Q = { ...info.c, z: info.zc };
   for (let a = 0.5; a < 90; a += 1) {
     const d = { x: Math.cos(a * D2R) * info.n.x, y: Math.cos(a * D2R) * info.n.y, z: Math.sin(a * D2R) };
-    if (trace(info, Q, d) === 'sky') n++;
+    if (isSky(trace(info, Q, d))) n++;
   }
   return n;
 }
@@ -279,7 +325,7 @@ export function sunHours(env, info, day, from = 6, to = 18, step = 0.25) {
     if (alt < 3 * D2R) continue;
     const s = sunVector(env.site, alt, az);
     if (s.x * info.n.x + s.y * info.n.y <= 0.03) continue;
-    if (trace(info, Q, s) === 'sky') hrs += step;
+    if (isSky(trace(info, Q, s))) hrs += step;
   }
   return hrs;
 }
@@ -421,11 +467,7 @@ export function analyzeDaylight(plan, site, { step = 30, patches = true } = {}) 
 
 // 建築技術規則：有效採光以 D/H ≥ 1/4 粗估（D＝窗前淨距，H＝窗中心以上的遮擋高度）
 export function effective(w) {
-  if (w.kind === 'void') {
-    const across = Math.abs(w.n.x) > 0.5 ? w.void.x1 - w.void.x0 : w.void.y1 - w.void.y0;
-    const H = w.voidTop - w.zc;
-    return H <= 0 || across / H >= 0.25;
-  }
+  if (w.kind === 'void') return voidDH(w).ratio >= 0.25;
   if (w.party) return false;
   if (!(w.obsH > w.zc) || !isFinite(w.obsD)) return true;
   return w.obsD / (w.obsH - w.zc) >= 0.25;
@@ -526,7 +568,8 @@ export function designWindows(plan, site, { rooms: only = null, replace = true, 
   const report = [];
   const added = [];
   const removed = [];
-  const targets = plan.rooms.filter((r) => r.pts.length >= 3 && WIN_SPEC[r.kind] && (!only || only.includes(r.id)));
+  // 走道、樓梯（optional）預設不重新開窗，所以也不能把它們原有的窗拿掉（例如走廊對天井的窗）
+  const targets = plan.rooms.filter((r) => r.pts.length >= 3 && WIN_SPEC[r.kind] && (!only || only.includes(r.id)) && (includeOptional || !WIN_SPEC[r.kind].optional));
   // 先移除這些房間外牆上的舊窗（保留門與陽台落地門）
   if (replace) {
     const kill = new Set();
@@ -677,7 +720,7 @@ export function sunPatches(result, sun) {
   const out = [];
   for (const w of result.wins) {
     if (sun.x * w.n.x + sun.y * w.n.y <= 0.02) continue;
-    if (trace(w, { ...w.c, z: w.zc }, sun) !== 'sky') continue;
+    if (!isSky(trace(w, { ...w.c, z: w.zc }, sun))) continue;
     const pts = [];
     for (const [a, z] of [[-w.gw / 2, w.z0], [w.gw / 2, w.z0], [w.gw / 2, w.z1], [-w.gw / 2, w.z1]]) {
       const x = w.c.x + w.u.x * a, y = w.c.y + w.u.y * a;

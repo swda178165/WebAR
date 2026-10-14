@@ -136,7 +136,7 @@ button { cursor: pointer; }
 .side-tabs { position: sticky; top: 0; z-index: 2; display: flex; gap: 4px; padding: 8px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .side-tabs button { flex: 1; height: 30px; border: 0; border-radius: 7px; background: none; color: var(--ink-2); font-weight: 500; }
 .side-tabs button.on { background: var(--ink); color: var(--panel); }
-#props, #sitePanel { padding: 14px 14px 40px; display: grid; gap: 16px; }
+#props, #sitePanel, #ventPanel { padding: 14px 14px 40px; display: grid; gap: 16px; }
 .site-sides { display: grid; gap: 8px; }
 .site-side { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
 .site-side .head { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
@@ -581,3 +581,39 @@ body.bmode .plan-only { display: none !important; }
 .pano-view { place-items: stretch; }
 .pano-canvas { width: 100%; height: 100%; display: block; cursor: grab; }
 @media (prefers-reduced-motion: reduce) { .rnd-bar .bar span { transition: none; } }
+
+/* ---------- 通風 ---------- */
+#plan2d .vent-flow { fill: none; stroke: #2b7fc1; stroke-linecap: round; opacity: 0.78; animation: ventDash 1.3s linear infinite; }
+@keyframes ventDash { to { stroke-dashoffset: calc(-1 * var(--p, 40px)); } }
+#plan2d .vent-arr.in { fill: #1f6fb2; }
+#plan2d .vent-arr.out { fill: #d9822b; }
+#plan2d .vent-arr.mid { fill: #6c9cc4; }
+#plan2d .vent-text { font-family: var(--font-mono); text-anchor: middle; paint-order: stroke; stroke: var(--paper); stroke-width: 3px; fill: #164e7a; font-weight: 500; }
+#plan2d .vent-shaft circle { fill: rgba(217, 130, 43, 0.16); stroke: #d9822b; }
+#plan2d .vent-shaft path { fill: #d9822b; }
+#plan2d .vent-shaft text { font-family: var(--font-ui); text-anchor: middle; fill: #9a5413; font-weight: 700; paint-order: stroke; stroke: var(--paper); stroke-width: 3px; }
+#plan2d .vent-wind path { fill: #1f6fb2; opacity: 0.85; }
+#plan2d .vent-wind text { font-family: var(--font-ui); fill: #164e7a; font-weight: 700; paint-order: stroke; stroke: var(--paper); stroke-width: 4px; }
+:root[data-theme="dark"] #plan2d .vent-text, :root[data-theme="dark"] #plan2d .vent-wind text { fill: #9cc8ec; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #plan2d .vent-text, :root:not([data-theme="light"]) #plan2d .vent-wind text { fill: #9cc8ec; } }
+@media (prefers-reduced-motion: reduce) { #plan2d .vent-flow { animation: none; } }
+.vent-wind { display: flex; gap: 10px; align-items: center; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+.vent-wind svg { width: 54px; height: 54px; flex: none; }
+.vent-wind b { display: block; font-weight: 500; }
+.vent-wind small { color: var(--ink-2); font-size: 11.5px; }
+.vent-tips { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+.vent-section { width: 100%; max-height: 360px; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; }
+.vent-section .vs-ground { stroke: var(--ink-3); stroke-width: 10; }
+.vent-section .vs-slab { stroke: var(--ink-2); stroke-width: 8; }
+.vent-section .vs-floor { opacity: 0.75; stroke: var(--ink-3); stroke-width: 4; }
+.vent-section .vs-shaft { fill: var(--panel); stroke: var(--ink-3); stroke-width: 5; stroke-dasharray: 18 12; opacity: 0.9; }
+.vent-section .vs-t { font-size: 100px; font-family: var(--font-ui); fill: var(--ink); paint-order: stroke; stroke: var(--paper); stroke-width: 16px; font-weight: 500; }
+.vent-section .vs-t.c { text-anchor: middle; }
+.vent-section .vs-t.e { text-anchor: end; }
+.vent-section .vs-arr line { stroke-linecap: round; }
+.vent-section .vs-arr.in line, .vent-section .vs-arr.wind line { stroke: #1f6fb2; }
+.vent-section .vs-arr.in path, .vent-section .vs-arr.wind path { fill: #1f6fb2; }
+.vent-section .vs-arr.out line, .vent-section .vs-arr.up line { stroke: #d9822b; }
+.vent-section .vs-arr.out path, .vent-section .vs-arr.up path { fill: #d9822b; }
+
+.dl-row .df-badge { align-self: start; }

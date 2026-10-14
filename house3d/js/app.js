@@ -18,6 +18,8 @@ import { normalizeBuilding } from './building.js';
 import { BuildingUI } from './building-ui.js';
 import { AskUI } from './ask-ui.js';
 import { RenderUI } from './render.js';
+import { VentUI } from './vent-ui.js';
+import { WINDOW_TYPES, ventOf } from './vent.js';
 import { saveFile, downloadsCap, readAsText, readAsBuffer, readAsDataURL, imageToUnderlay, openPdf, renderPdfPage, extractPdfVectors } from './files.js';
 
 const STORE_KEY = 'house3d.project.v1';
@@ -112,6 +114,7 @@ class App {
     this.placeKind = 'bed';
     this.history = new Map(); // planId → {undo:[], redo:[]}
     this.daylight = { show: false, result: null, planId: null };
+    this.vent = { show: false, result: null, planId: null, floors: null };
     this.sideTab = 'props';
     try { this.ui = { simple: true, welcome: true, toured: false, ...JSON.parse(localStorage.getItem('house3d.ui') || '{}') }; } catch { this.ui = { simple: true, welcome: true, toured: false }; }
     this.load();
@@ -221,7 +224,7 @@ class App {
     const ss = document.getElementById('styleSel');
     if (ss && ss.value !== (this.plan.style || 'basic')) ss.value = this.plan.style || 'basic';
     if (!opts.skip3d) this.view.invalidate();
-    if (!transient) { this.renderProps(); this.scheduleDaylight(); }
+    if (!transient) { this.renderProps(); this.scheduleDaylight(); this.scheduleVent(); }
     else this.updatePropsLive();
   }
 
@@ -231,6 +234,7 @@ class App {
     if (!need) { this.daylight.result = null; return; }
     clearTimeout(this._dlT);
     const run = () => {
+      this.deriveShafts?.();
       try {
         this.daylight.result = analyzeDaylight(this.plan, this.site);
         this.daylight.planId = this.plan.id;
@@ -246,11 +250,14 @@ class App {
     document.querySelectorAll('#sideTabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
     $('#props').hidden = t !== 'props';
     $('#sitePanel').hidden = t !== 'site';
+    $('#ventPanel').hidden = t !== 'vent';
     if (t === 'site') { this.renderSitePanel(); this.scheduleDaylight(true); }
+    if (t === 'vent') { this.renderVentPanel(); this.scheduleVent(true); }
   }
 
   setDaylight(on) {
     this.daylight.show = on;
+    if (on && this.vent.show) this.setVent(false);
     $('#toggleDaylight').classList.toggle('on', on);
     if (on) this.scheduleDaylight(true); else this.editor.render();
     if (this.sideTab === 'site') this.renderSitePanel();
@@ -284,6 +291,7 @@ class App {
     this.save();
     this.view.setSunSim({ rebuild: true });
     this.scheduleDaylight();
+    this.scheduleVent();
     if (this.daylight.show) this.editor.render();
   }
 
@@ -410,6 +418,7 @@ class App {
     styleSel.addEventListener('change', () => { this.plan.style = styleSel.value; this.commit(); this.toast(`風格：${STYLES[styleSel.value].name}`); });
     document.querySelectorAll('#sideTabs button').forEach((b) => b.addEventListener('click', () => this.setSideTab(b.dataset.tab)));
     $('#toggleDaylight').onclick = () => this.setDaylight(!this.daylight.show);
+    $('#toggleVent').onclick = () => this.setVent(!this.vent.show);
     $('#toggleSun').onclick = () => this.setSun(!this.view.sunSim.on);
     const sm = $('#sunMonth');
     sm.innerHTML = Array.from({ length: 12 }, (_, i) => i + 1).map((m) => `<option value="${m}"${m === 12 ? ' selected' : ''}>${m} 月${{ 12: '（冬至）', 6: '（夏至）', 3: '（春分）', 9: '（秋分）' }[m] || ''}</option>`).join('');
@@ -475,6 +484,8 @@ class App {
     this.setTool('select');
     $('#sitePanel').addEventListener('change', (e) => this.onSiteField(e.target));
     $('#sitePanel').addEventListener('click', (e) => this.onSiteClick(e));
+    $('#ventPanel').addEventListener('change', (e) => this.onVentField(e.target));
+    $('#ventPanel').addEventListener('click', (e) => this.onVentClick(e));
   }
 
   applyTheme() {
@@ -583,6 +594,7 @@ class App {
         <li><b>擬真效果圖、360°：</b>3D 下方「📷 效果圖」用光線追蹤算出光從窗戶照進來、在牆面反彈的樣子（先按「漫遊」走進房間，就是室內照）；「🌐 360°」站在房間中間轉一圈，可以拖著看、手機轉著看，也能下載成 Facebook 認得的 360 照片。</li>
         <li><b>自動規劃：</b>按上方「自動規劃」，選幾房、幾衛、要不要書房／和室／神明廳等，程式會試過上百種配置、實際排家具並模擬採光，挑出幾種給你比較，喜歡的可以加入成新平面再拖拉修改。</li>
         <li><b>基地・採光：</b>右側「基地・採光」設定座向、隔壁、馬路與對面樓高，程式會算出每個房間的採光與冬至日照，「依基地條件自動開窗」會把窗開在光線最好的位置；平面圖下方「採光」顯示亮暗分布，3D 的「日照」可以看某月某時陽光照進屋內的樣子。</li>
+        <li><b>通風：</b>右側「通風」或平面圖下方「通風」：模擬開窗時風從哪裡進來、經過哪些房間、從天井或樓梯間往上排，每個房間一小時換幾次空氣；也會檢查建築技術規則第 43 條的通風面積、冷氣房關窗睡一夜的二氧化碳，並給建議（天井頂部做法、全熱交換器、排風機、窗型）。</li>
         <li><b>風格與款式：</b>3D 下方「風格」會整套換材質與家具款式（日式低床、北歐錐腳沙發、侘寂雲朵沙發、工業皮沙發、輕奢弧形沙發…）；單件家具也能在右側「款式」個別指定。</li>
         <li><b>匯出回 CAD：</b>「匯出 → DXF」產生 AutoCAD 可開的圖檔（單位公分，牆、門窗、家具分圖層）。這個 DXF 再丟回來也能完整還原。</li>
         <li><b>快捷鍵：</b><span class="kbd">V</span> 選取 <span class="kbd">W</span> 牆 <span class="kbd">D</span> 門 <span class="kbd">N</span> 窗 <span class="kbd">F</span> 家具 <span class="kbd">R</span> 旋轉 <span class="kbd">Del</span> 刪除 <span class="kbd">Ctrl+Z</span> 復原 <span class="kbd">Ctrl+D</span> 複製</li>
@@ -656,7 +668,7 @@ class App {
       const avg = hab.length ? hab.reduce((a, x) => a + x.df * x.area, 0) / hab.reduce((a, x) => a + x.area, 0) : 0;
       const [g] = dfGrade(avg);
       h += `<div class="stat"><div><b>${this.ui.simple ? suns(avg) : avg.toFixed(1) + '%'}</b><small>${this.ui.simple ? `房間平均亮度：${g}` : `居室平均採光係數（${g}）`}</small></div>
-        <div><b>${r.cross ? '可以' : '不行'}</b><small>${r.cross ? '前後（或左右）都有窗，能對流通風' : '只有單面開窗，通風較差'}</small></div></div>
+        <div><b>${r.cross ? '可以' : '不行'}</b><small>${r.cross ? '前後（或左右）都有窗，能對流通風' : '只有單面開窗，通風較差'}・<a href="#" data-sa="vent">看通風模擬</a></small></div></div>
         <div class="dl-legend adv">${DF_LEGEND.map((v) => `<span style="background:${dfColor(v)}"></span>`).join('')}</div>
         <div class="dl-legend-l adv"><span>暗 0%</span><span>1%</span><span>2%</span><span>亮 5%+</span></div>
         <div class="dl-table">${r.rooms.filter((x) => x.kind !== 'stair' && (x.windows.length || ['living', 'bedroom', 'kitchen'].includes(x.kind))).map((x) => {
@@ -741,10 +753,12 @@ class App {
   onSiteClick(e) {
     const b = e.target.closest('[data-sa]');
     if (b) {
+      e.preventDefault();
       const a = b.dataset.sa;
       if (a === 'autoWin') return this.autoWindows();
       if (a === 'wizard') return this.openSiteWizard();
       if (a === 'heat') return this.setDaylight(!this.daylight.show);
+      if (a === 'vent') return this.setSideTab('vent');
       if (a === 'sun') return this.setSun(!this.view.sunSim.on);
     }
     const row = e.target.closest('[data-room]');
@@ -1367,7 +1381,8 @@ class App {
           <div class="fields">${this.sel_('類型', 'type', obj.type, Object.entries(OPENING_TYPES))}${this.num('寬度', 'w', obj.w, { step: 5, min: 20 })}
           ${this.num('高度', 'h', obj.h, { step: 5, adv: true })}${this.num('窗台高', 'sill', obj.sill || 0, { step: 5, adv: true })}
           ${this.num('距牆端', 'off', obj.pos - obj.w / 2, { step: 1, adv: true })}${this.num('距另一端', 'off2', L - obj.pos - obj.w / 2, { step: 1, adv: true })}</div>
-          ${obj.type === 'window' ? `<div class="checks"><label><input type="checkbox" data-k="frosted"${obj.frosted ? ' checked' : ''}> 霧面玻璃</label><label><input type="checkbox" data-k="shade"${obj.shade ? ' checked' : ''}> 外遮陽板</label></div>` : ''}
+          ${obj.type === 'window' ? `<div class="fields">${this.sel_('窗型（通風）', 'vtype', obj.vtype || '', [['', `跟通風設定（${WINDOW_TYPES[ventOf(this.site).window]?.name || '橫拉窗'}）`], ...Object.entries(WINDOW_TYPES).map(([k, x]) => [k, `${x.name}（可開 ${Math.round(x.open * 100)}%）`])], true)}</div>
+          <div class="checks"><label><input type="checkbox" data-k="frosted"${obj.frosted ? ' checked' : ''}> 霧面玻璃</label><label><input type="checkbox" data-k="shade"${obj.shade ? ' checked' : ''}> 外遮陽板</label></div>` : ''}
           <p class="note">沿著牆拖曳可移動位置，拖到另一面牆上會換牆。</p>
           <div class="row">${obj.type === 'door' ? '<button class="btn" data-a="flipSide">換開門方向</button><button class="btn adv" data-a="flipHinge">換鉸鏈邊</button>' : ''}<button class="btn danger" data-a="del">刪除</button></div></div>`;
       } else if (s.type === 'item') {
@@ -1479,6 +1494,7 @@ class App {
         const d = this.defaultOpening(v === 'elevator' ? 'door' : v);
         obj.h = d.h; obj.sill = d.sill;
       } else if (k === 'frosted' || k === 'shade') { obj[k] = v || undefined; }
+      else if (k === 'vtype') obj.vtype = v || undefined;
       else if (k === 'off') obj.pos = v + obj.w / 2;
       else if (k === 'off2') obj.pos = L - v - obj.w / 2;
       else if (k === 'w') { const c = obj.pos; obj.w = Math.min(v, L); obj.pos = c; }
@@ -1669,4 +1685,5 @@ class App {
 Object.defineProperties(App.prototype, Object.getOwnPropertyDescriptors(BuildingUI));
 Object.defineProperties(App.prototype, Object.getOwnPropertyDescriptors(AskUI));
 Object.defineProperties(App.prototype, Object.getOwnPropertyDescriptors(RenderUI));
+Object.defineProperties(App.prototype, Object.getOwnPropertyDescriptors(VentUI));
 window.house3d = new App();

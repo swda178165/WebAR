@@ -79,6 +79,7 @@
         <button id="zoomIn" title="放大" aria-label="放大">+</button>
         <button id="toggleUnderlay" class="toggle adv" title="顯示媽媽的原圖當底圖">原圖</button>
         <button id="toggleDaylight" class="toggle" title="依基地條件模擬採光（顏色越亮代表越亮）">採光</button>
+        <button id="toggleVent" class="toggle" title="模擬開窗時風怎麼走、每個房間一小時換幾次空氣">通風</button>
       </div>
       <div class="catalog" id="catalog" hidden></div>
     </section>
@@ -122,9 +123,11 @@
       <div class="side-tabs" id="sideTabs" role="tablist">
         <button data-tab="props" class="on" role="tab">屬性</button>
         <button data-tab="site" role="tab">基地・採光</button>
+        <button data-tab="vent" role="tab">通風</button>
       </div>
       <div id="props"></div>
       <div id="sitePanel" hidden></div>
+      <div id="ventPanel" hidden></div>
     </aside>
   </div>
 

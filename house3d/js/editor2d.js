@@ -8,6 +8,7 @@ import { CATALOG, itemName } from './catalog.js';
 import { detectRoom } from './geometry.js';
 import { variantOf } from './styles.js';
 import { dfColor, sunPatches, sunVector, planFrame, bearingOf, dirName, SIDE_NAMES, SIDE_TYPES } from './site.js';
+import { achColor, windTravel, windLabel, fmtAch, TYPE_NAMES } from './vent.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -107,6 +108,7 @@ export class Editor2D {
     }
     out.push('</g>');
     out.push(this.daylightSvg(fs));
+    out.push(this.ventSvg(fs, 'under'));
     // 家具
     out.push('<g class="items">');
     for (const it of plan.items) out.push(this.itemSvg(it, sel?.type === 'item' && sel.id === it.id));
@@ -164,6 +166,7 @@ export class Editor2D {
     }
     // 尺寸
     if (st.dims) out.push(this.dimsSvg(fs));
+    out.push(this.ventSvg(fs, 'over'));
     out.push(this.selectionSvg(fs));
     out.push(this.draftSvg(fs));
     this.svg.innerHTML = out.join('');
@@ -220,6 +223,90 @@ export class Editor2D {
     const ang = Math.atan2(nv.y / nl, nv.x / nl) * 180 / Math.PI + 90;
     const R = fs * 1.6, ox = fr.maxX + R * 2.6, oy = fr.minY + R * 1.4;
     out.push(`<g class="compass" transform="translate(${f1(ox)} ${f1(oy)})"><circle r="${f1(R)}" vector-effect="non-scaling-stroke"/><path transform="rotate(${f1(ang)})" d="M 0 ${f1(-R * 0.92)} L ${f1(R * 0.32)} ${f1(R * 0.35)} L 0 ${f1(R * 0.12)} L ${f1(-R * 0.32)} ${f1(R * 0.35)} Z"/><text x="${f1(Math.cos((ang - 90) * Math.PI / 180) * R * 1.45)}" y="${f1(Math.sin((ang - 90) * Math.PI / 180) * R * 1.45 + fs * 0.35)}" font-size="${f1(fs)}">北</text></g>`);
+    out.push('</g>');
+    return out.join('');
+  }
+
+  // 通風模擬：房間依換氣次數上色、門窗上的風向箭頭、房間裡會流動的風路徑、天井與樓梯間往上拔風、外面的風向
+  ventSvg(fs, layer) {
+    const app = this.app, vs = app.vent;
+    if (!vs?.show || !vs.result || vs.planId !== app.plan.id) return '';
+    const r = vs.result, plan = app.plan;
+    const roomOf = new Map(plan.rooms.map((x) => [x.id, x]));
+    if (layer === 'under') {
+      const t = ['<g class="vent-tint" opacity="0.42" pointer-events="none">'];
+      for (const x of r.rooms) { const room = roomOf.get(x.id); if (room) t.push(`<polygon points="${pts(room.pts)}" fill="${achColor(x.ach)}"/>`); }
+      return t.join('') + '</g>';
+    }
+    const out = ['<g class="vent" pointer-events="none">'];
+    const width = (q) => Math.max(fs * 0.14, Math.min(fs * 0.6, fs * 0.13 * Math.log2(1 + q / 20)));
+    const dash = `stroke-dasharray:${f1(fs * 0.7)} ${f1(fs * 1.0)};--p:${f1(fs * 1.7)}`;
+    // 房間裡的風路徑：主要進風口 → 房間中間 → 主要出風口
+    for (const x of r.rooms) {
+      const n = r.nodes.find((nn) => nn.id === x.id);
+      const room = n && roomOf.get(x.id);
+      if (!room) continue;
+      const c = room.label || polygonCentroid(room.pts);
+      const flows = [];
+      for (const ed of r.edges) {
+        if ((ed.a !== n.i && ed.b !== n.i) || !ed.at || ed.kind === 'leak' || ed.kind === 'top') continue;
+        const into = (ed.b === n.i ? ed.Q : -ed.Q) * 3600;
+        if (Math.abs(into) >= 12) flows.push({ ed, into });
+      }
+      const ins = flows.filter((f) => f.into > 0).sort((a, b) => b.into - a.into).slice(0, 2);
+      const outs = flows.filter((f) => f.into < 0).sort((a, b) => a.into - b.into).slice(0, 2);
+      for (const i of ins) for (const o of outs) {
+        const q = Math.min(i.into, -o.into);
+        const p0 = i.ed.at, p1 = o.ed.at;
+        out.push(`<path d="M ${f1(p0.x)} ${f1(p0.y)} Q ${f1(c.x)} ${f1(c.y)} ${f1(p1.x)} ${f1(p1.y)}" class="vent-flow" stroke-width="${f1(width(q))}" style="${dash}"/>`);
+      }
+    }
+    // 門窗上的箭頭（藍＝從外面進來、橘＝往外面或天井出去、淺藍＝房間之間）
+    for (const ed of r.edges) {
+      if (!ed.at || !ed.dir || ed.kind === 'leak' || ed.kind === 'top') continue;
+      const q = Math.abs(ed.Q) * 3600;
+      if (q < 12) continue;
+      const s = ed.Q >= 0 ? 1 : -1;
+      const d = { x: ed.dir.x * s, y: ed.dir.y * s };
+      const L = Math.max(fs * 1.3, Math.min(fs * 3.2, fs * 0.8 * Math.log2(1 + q / 15)));
+      const w = Math.max(fs * 0.22, Math.min(fs * 0.55, L * 0.2));
+      const cls = ed.kind === 'win' ? (ed.Q < 0 ? 'in' : 'out') : 'mid';
+      const t = { x: ed.at.x + d.x * L / 2, y: ed.at.y + d.y * L / 2 };
+      const b0 = { x: ed.at.x - d.x * L / 2, y: ed.at.y - d.y * L / 2 };
+      const hb = { x: t.x - d.x * L * 0.45, y: t.y - d.y * L * 0.45 };
+      const pp = { x: -d.y, y: d.x };
+      const poly = [b0.x + pp.x * w * 0.38, b0.y + pp.y * w * 0.38, hb.x + pp.x * w * 0.38, hb.y + pp.y * w * 0.38, hb.x + pp.x * w, hb.y + pp.y * w, t.x, t.y,
+        hb.x - pp.x * w, hb.y - pp.y * w, hb.x - pp.x * w * 0.38, hb.y - pp.y * w * 0.38, b0.x - pp.x * w * 0.38, b0.y - pp.y * w * 0.38];
+      out.push(`<polygon class="vent-arr ${cls}" points="${poly.map(f1).join(' ')}"/>`);
+    }
+    // 天井、樓梯間：往上拔風
+    for (const sh of r.shafts) {
+      const c = sh.kind === 'lw' ? { x: (sh.rect.x0 + sh.rect.x1) / 2, y: (sh.rect.y0 + sh.rect.y1) / 2 } : sh.rooms?.[0] && polygonCentroid(sh.rooms[0].pts);
+      if (!c) continue;
+      const up = sh.up >= 0;
+      const R = fs * 1.5;
+      const ar = up ? `M ${f1(c.x)} ${f1(c.y - R * 0.7)} L ${f1(c.x + R * 0.5)} ${f1(c.y)} L ${f1(c.x + R * 0.18)} ${f1(c.y)} L ${f1(c.x + R * 0.18)} ${f1(c.y + R * 0.6)} L ${f1(c.x - R * 0.18)} ${f1(c.y + R * 0.6)} L ${f1(c.x - R * 0.18)} ${f1(c.y)} L ${f1(c.x - R * 0.5)} ${f1(c.y)} Z` : '';
+      out.push(`<g class="vent-shaft"><circle cx="${f1(c.x)}" cy="${f1(c.y)}" r="${f1(R)}" stroke-width="${f1(fs * 0.12)}"/>${ar ? `<path d="${ar}"/>` : ''}
+        <text x="${f1(c.x)}" y="${f1(c.y + R + fs * 1.1)}" font-size="${f1(fs * 0.85)}">${sh.kind === 'lw' ? '天井' : '樓梯間'}${up ? '往上排' : '往下'} ${Math.round(Math.abs(sh.up) / 10) * 10} m³/h</text></g>`);
+    }
+    // 每個房間的換氣次數
+    for (const x of r.rooms) {
+      const room = roomOf.get(x.id);
+      if (!room || x.kind === 'storage') continue;
+      const c = room.label || polygonCentroid(room.pts);
+      out.push(`<text x="${f1(c.x)}" y="${f1(c.y + fs * 2.35)}" font-size="${f1(fs * 0.85)}" class="vent-text">換氣 ${fmtAch(x.ach)} 次/時</text>`);
+      if (this.app.settings.area && this.view.scale >= 0.55) out.push(`<text x="${f1(c.x)}" y="${f1(c.y + fs * 3.4)}" font-size="${f1(fs * 0.72)}" class="vent-text">${TYPE_NAMES[x.type]}</text>`);
+    }
+    // 外面的風
+    const fr = planFrame(plan);
+    const tv = windTravel(app.site, r.v);
+    const cx = (fr.minX + fr.maxX) / 2, cy = (fr.minY + fr.maxY) / 2;
+    const ext = Math.abs(tv.x) * (fr.maxX - fr.minX) / 2 + Math.abs(tv.y) * (fr.maxY - fr.minY) / 2 + fs * 6;
+    const tip = { x: cx - tv.x * ext, y: cy - tv.y * ext };
+    const L = fs * 5, W = fs * 1.1;
+    const tail = { x: tip.x - tv.x * L, y: tip.y - tv.y * L }, hb = { x: tip.x - tv.x * L * 0.4, y: tip.y - tv.y * L * 0.4 }, pp = { x: -tv.y, y: tv.x };
+    const wp = [tail.x + pp.x * W * 0.4, tail.y + pp.y * W * 0.4, hb.x + pp.x * W * 0.4, hb.y + pp.y * W * 0.4, hb.x + pp.x * W, hb.y + pp.y * W, tip.x, tip.y, hb.x - pp.x * W, hb.y - pp.y * W, hb.x - pp.x * W * 0.4, hb.y - pp.y * W * 0.4, tail.x - pp.x * W * 0.4, tail.y - pp.y * W * 0.4];
+    out.push(`<g class="vent-wind"><path d="M ${wp.map(f1).join(' ')} Z"/><text x="${f1(tail.x - tv.x * fs)}" y="${f1(tail.y - tv.y * fs + fs * 0.4)}" font-size="${f1(fs * 1.05)}" text-anchor="middle">${esc(windLabel(app.site, r.v))}</text></g>`);
     out.push('</g>');
     return out.join('');
   }

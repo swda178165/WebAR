@@ -77,6 +77,10 @@ function parseClause(t, ctx, floor) {
   if (has(t, '360|環景|全景|VR|轉一圈')) return [{ type: 'view', what: 'pano' }];
   if (has(t, '效果圖|擬真|像照片|渲染|拍一張|拍照|真實')) return [{ type: 'view', what: 'render' }];
 
+  // ---- 通風 ----
+  const vent = parseVent(t);
+  if (vent) return vent;
+
   // ---- 外觀 ----
   const facadeCtx = has(t, '外觀|外牆|立面|外面的牆|房子外面|窗框|欄杆|屋頂|格柵|雨遮|花架') || pick(t, FACADE_WALL);
   if (facadeCtx && !has(t, '屋頂.*(房間|神明|和室)')) {
@@ -217,6 +221,45 @@ function parseClause(t, ctx, floor) {
   return null;
 }
 
+const DIR_WORDS = { 東北: 45, 東南: 135, 西南: 225, 西北: 315, 東: 90, 南: 180, 西: 270, 北: 0 };
+const DIR_RE = '(東北|東南|西南|西北|東|南|西|北)';
+function parseVent(t) {
+  const set = {};
+  const neg = has(t, '不要|不用|拿掉|取消|不裝|關掉|不加');
+  if (has(t, '天井')) {
+    if (has(t, '封起來|封死|封住|蓋死|整個蓋|全部蓋')) set.lwTop = 'sealed';
+    else if (has(t, '不要蓋|不加蓋|開放|拿掉.*(蓋|頂|罩)|打開天井|天井打開')) set.lwTop = 'open';
+    else if (has(t, '頂蓋|加蓋|採光罩|遮雨|雨棚|蓋起來|加頂|百葉')) set.lwTop = 'louver';
+    if (has(t, '刷白|白色|淺色|反光|亮色')) set.lwWall = has(t, '不要刷|不用刷') ? 'normal' : 'light';
+    if (!Object.keys(set).length && has(t, '光|亮|暗')) return [{ type: 'view', what: 'daylight' }];
+  }
+  if (!has(t, '廚房|大門|鐵捲門')) {
+    if (has(t, '房門.*(關上|關起來|關著|關)|門都?(關上|關起來|關著)')) set.doors = 'closed';
+    else if (has(t, '房門.*(打開|開著|開)|門都?(打開|開著)')) set.doors = 'open';
+  }
+  if (has(t, '全熱交換|新風機|換氣機|新鮮空氣機|ERV|erv')) set.erv = !neg;
+  if (has(t, '樓梯') && has(t, '高窗|排風|通風窗|風球|排煙窗|氣窗|天窗|抽風|拔風')) set.stairVent = !neg;
+  if (has(t, '浴室|廁所|衛浴') && has(t, '排風機|抽風機|排風扇|抽風扇|換氣扇')) set.bathFan = !neg;
+  if (has(t, '窗') && has(t, '換成|改成|改用|都用|窗型|用')) {
+    const w = has(t, '推射窗|推窗|外推') ? 'casement' : has(t, '上懸窗|內倒窗|內開內倒') ? 'tilt' : has(t, '橫拉窗|拉窗') ? 'slide' : null;
+    if (w) set.window = w;
+  }
+  const ji = t.match(new RegExp(DIR_RE + '季風'));
+  const from = t.match(new RegExp('風從' + DIR_RE)) || t.match(new RegExp(DIR_RE + '風(吹|來|的話|時|$)'));
+  if (ji) { set.wind = DIR_WORDS[ji[1]]; set.season = ji[1] === '東北' ? 'winter' : 'summer'; }
+  else if (from) set.wind = DIR_WORDS[from[1]];
+  if (has(t, '風向') && has(t, '預設|城市|原本|常見')) set.wind = null;
+  const sp = t.match(/風速\s*(\d+(?:\.\d+)?)/);
+  if (sp) set.speed = +sp[1];
+  if (has(t, '通風|對流|風|換氣') && !set.season) {
+    if (has(t, '夏天|夏季')) set.season = 'summer';
+    else if (has(t, '冬天|冬季')) set.season = 'winter';
+  }
+  if (Object.keys(set).length) return [{ type: 'vent', set }];
+  if (has(t, '通風|對流|風怎麼走|空氣流通|悶不悶|悶熱|穿堂風|換氣|透氣|風的路徑|看風|二氧化碳|CO2')) return [{ type: 'view', what: 'vent' }];
+  return null;
+}
+
 export function pickKind(t) {
   for (const [re, k] of KIND_WORDS) if (new RegExp(re).test(t)) return k;
   return null;
@@ -241,7 +284,8 @@ export function matchRoom(t, rooms) {
 
 // 給 Claude 的說明：可以用哪些動作
 export const ACTION_DOC = `動作（JSON 物件，type 必填）：
-- {"type":"view","what":"building|floor:2F|focus:2F|walk|iso|front|top|sun|daylight|render|pano"}：看整棟、打開某層平面、剖開某層、漫遊、日照、採光、效果圖、360 環景
+- {"type":"view","what":"building|floor:2F|focus:2F|walk|iso|front|top|sun|daylight|vent|render|pano"}：看整棟、打開某層平面、剖開某層、漫遊、日照、採光、通風、效果圖、360 環景
+- {"type":"vent","set":{"doors":"open|closed","window":"slide|casement|tilt","season":"summer|winter","wind":0-359 或 null（風從哪個方位吹來，度）,"speed":2,"lwTop":"open|louver|sealed","lwWall":"normal|light","stairVent":true,"bathFan":true,"erv":false,"screen":true}}：通風模擬的設定（天井頂部做法、牆面顏色、全熱交換器等）
 - {"type":"floorUse","floor":"1F|2F|3F|4F|5F|RF","use":"shop|rent|home|roof|empty"}：某層改用途（shop＝一樓大空間，RF＝頂樓）
 - {"type":"building","set":{"n":3,"hasRoof":true,"shop.entry":"back|side","shop.scooters":0-7,"shop.hall":"living|shop|office|empty","shop.toilet":true,"rent.rooms":2|3,"roof.rooms":0|1|2,"roof.back":"tatami|bedroom|study|storage","roof.front":"altar|family|tatami","facade.wall":"paint|tile|stone|concrete|terrazzo","facade.color":"#rrggbb","facade.frame":"black|white|champagne|wood","facade.rail":"solid|glass|iron","facade.roof":"flat|pitched|pergola","facade.grille":"none|wood|alu","facade.awning":true}}
 - {"type":"facadePreset","preset":"modern|concrete|brick|japan|stone"}
